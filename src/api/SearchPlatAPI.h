@@ -22,6 +22,8 @@
 #include <NTQuery.h>
 #include <oledb.h>
 #include <SearchAPI.h>
+#include <shlobj.h>
+#include "KnownFolders.h"
 
 /* Common Helpers
 * 
@@ -31,6 +33,8 @@
 
 #ifdef SEARCHPLAT_API_CACHE
 #define CACHE_OBJECTS 1
+#else
+#define CACHE_OBJECTS 0
 #endif
 
 /* INDEX MANAGEMENT */
@@ -99,7 +103,22 @@ IsFilePathIncludedInIndex(PCWSTR path)
     return included;
 }
 
-/* INDEX QUERY OPERATIONS */
+/* INDEX QUERY OPERATIONS
+* 
+*  These methods help developers with the complex nature of performance around indexer queries. 
+*  They include best practices and helpers to make building parts of the queries easy* 
+* 
+*/
+__forceinline std::wstring GetKnownFolderScope(const KNOWNFOLDERID& knownFolderId)
+{
+    // in the majority of cases, MAX_PATH is sufficient for known folder ids....
+    // we can expand if we get feedback we need to
+    wil::unique_cotaskmem_string path;
+    THROW_IF_FAILED(SHGetKnownFolderPath(knownFolderId, 0, nullptr, &path));
+
+    return std::wstring(path.get());
+}
+
 __forceinline std::wstring BuildPrimingSqlFromScopes(const std::vector<std::wstring>& includedScopes, const std::vector<std::wstring>& excludedScopes)
 {
     std::wstring queryStr(L"SELECT System.ItemUrl FROM SystemIndex WHERE");
@@ -107,19 +126,31 @@ __forceinline std::wstring BuildPrimingSqlFromScopes(const std::vector<std::wstr
     // build the included, and excluded scope lists
     for (size_t i = 0; i < includedScopes.size(); ++i)
     {
-        queryStr += L" SCOPE=";
-        queryStr += includedScopes[i].c_str();
+        std::wstring scope(includedScopes[i]);
+        std::replace(scope.begin(), scope.end(), L'\\', L'/');
+        if (i == 0)
+        {
+            queryStr += L" (";
+        }
+        queryStr += L" SCOPE='file:";
+        queryStr += scope + L'\'';
         if (i < (includedScopes.size() - 1))
         {
-            queryStr += L" AND";
+            queryStr += L" OR";
+        }
+        else
+        {
+            queryStr += L")";
         }
     }
 
     for (size_t i = 0; i < excludedScopes.size(); ++i)
     {
-        queryStr += L" SCOPE!=";
-        queryStr += excludedScopes[i].c_str();
-        if (i < (includedScopes.size() - 1))
+        std::wstring scope(excludedScopes[i]);
+        std::replace(scope.begin(), scope.end(), L'\\', L'/');
+        queryStr += L" SCOPE <> 'file:";
+        queryStr += excludedScopes[i].c_str() + L'\'';
+        if (i < (excludedScopes.size() - 1))
         {
             queryStr += L" AND";
         }
@@ -128,10 +159,8 @@ __forceinline std::wstring BuildPrimingSqlFromScopes(const std::vector<std::wstr
     return queryStr;
 }
 
-
-__forceinline winrt::com_ptr<IRowset> CreateQueryPrimingRowset(const std::vector<std::wstring>& includedScopes, const std::vector<std::wstring>& excludedScopes)
+__forceinline winrt::com_ptr<IRowset> ExecuteQuery(std::wstring sql)
 {
-    // Query CommandText
     winrt::com_ptr<IDBInitialize> dataSource;
     THROW_IF_FAILED(CoCreateInstance(CLSID_CollatorDataSource, 0, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(dataSource.put())));
     THROW_IF_FAILED(dataSource->Initialize());
@@ -145,16 +174,42 @@ __forceinline winrt::com_ptr<IRowset> CreateQueryPrimingRowset(const std::vector
     THROW_IF_FAILED(createCommand->CreateCommand(0, IID_ICommandText, unkCmdPtr.put()));
 
     winrt::com_ptr<ICommandText> cmdTxt = unkCmdPtr.as<ICommandText>();
-    std::wstring sqlStr = BuildPrimingSqlFromScopes(includedScopes, excludedScopes);
-    THROW_IF_FAILED(cmdTxt->SetCommandText(DBGUID_DEFAULT, sqlStr.c_str()));
+    THROW_IF_FAILED(cmdTxt->SetCommandText(DBGUID_DEFAULT, sql.c_str()));
 
     DBROWCOUNT rowCount = 0;
     winrt::com_ptr<::IUnknown> unkRowsetPtr;
     THROW_IF_FAILED(cmdTxt->Execute(nullptr, IID_IRowset, nullptr, &rowCount, unkRowsetPtr.put()));
 
-    winrt::com_ptr<IRowset> rowset = unkRowsetPtr.as<IRowset>();
+    return unkRowsetPtr.as<IRowset>();
+}
 
-    return rowset;
+/* Creates the priming rowset query. 
+*  
+*  Typically this is done when a user in an application interacts with a search box experience.
+*  When the user clicks the box, you want to tell the system indexer "hey a query is coming"
+*  The query should contain basic information about the scope of the data you want to search over.
+*  
+*  When the user starts typing, the developer can use the priming rowset and update it with more information. This avoids index decoding
+*  per query instance and is the optimal way to issue queries using OLEDB/SQL
+* 
+*  Calling this method a second time will deallocate the previous priming rowset, and do the work to create one again
+*/
+struct IndexerRowsetQuery
+{
+    std::wstring sql;
+    winrt::com_ptr<IRowset> rowset;
+};
+static IndexerRowsetQuery s_primingQuery;
+__forceinline winrt::com_ptr<IRowset> CreateQueryPrimingRowset(const std::vector<std::wstring>& includedScopes, const std::vector<std::wstring>& excludedScopes)
+{
+    FAIL_FAST_IF(!CACHE_OBJECTS); // caching is required for priming and rowset caching
+    std::wstring sqlStr = BuildPrimingSqlFromScopes(includedScopes, excludedScopes);
+
+    auto rowset = ExecuteQuery(sqlStr);
+
+    s_primingQuery.sql = std::move(sqlStr);
+    s_primingQuery.rowset = rowset;
+    return s_primingQuery.rowset;
 }
 
 __forceinline DWORD GetReuseWhereIDFromRowset(const winrt::com_ptr<IRowset>& rowset)
@@ -177,5 +232,18 @@ __forceinline DWORD GetReuseWhereIDFromRowset(const winrt::com_ptr<IRowset>& row
     wil::unique_cotaskmem_ptr<DBPROPSET> sprgPropSets(prgPropSets);
 
     return prgPropSets->rgProperties->vValue.ulVal;
+}
 
+/* Executes searching the entire system index with a string using the priming query as the base IRowset
+*  
+*  The initial priming query should have been generated via CreateQueryPrimingRowset with included and excluded scopes.
+*  This method then takes in a string and searches across that query. 
+*
+*/
+__forceinline winrt::com_ptr<IRowset> ExecuteQueryUsingPrimingQuery(const std::wstring& searchText)
+{
+    auto reuseWhereId = GetReuseWhereIDFromRowset(s_primingQuery.rowset);
+    std::wstring querySql = s_primingQuery.sql + L" AND CONTAINS('" + searchText + L"') AND REUSEWHERE(" + std::to_wstring(reuseWhereId) + L")";
+
+    return ExecuteQuery(s_primingQuery.sql);
 }
