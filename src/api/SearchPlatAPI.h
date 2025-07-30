@@ -1,23 +1,26 @@
 /*
 * Author: Brendan Flynn
 * Date: 5/21/2025
-* 
+*
 * This file is a public API around the existing Windows Search Indexer platform APIs
-* 
+*
 * The goal is to abstract the complicated pieces into segements and functions a developer of a search
 * application would most likely use
-* 
-* This API set throws exceptions on failure. 
-* It is inlined, and only this header should be needed on Windows SDK builds starting with 17763. 
-* 
+*
+* This API set throws exceptions on failure.
+* It is inlined, and only this header should be needed on Windows SDK builds starting with 17763.
+*
 * This header requires the Windows Implementation Library for resource and result macros
-* 
+*
 * Enjoy!
 */
 
 #include <winrt/base.h>
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Foundation.Collections.h>
 #include <wil/result.h>
 #include <wil/resource.h>
+#include <functional>
 #include <Unknwn.h>
 #include <NTQuery.h>
 #include <oledb.h>
@@ -27,7 +30,7 @@
 #include <intsafe.h>
 
 /* Common Helpers
-* 
+*
 * These methods get access to the common interfaces exposed from the service
 * If #SEARCHPLAT_API_CACHE is defined, the interfaces will cache them otherwise will be created on each function call as needed
 */
@@ -39,7 +42,7 @@
 #endif
 
 /* MAIN SEARCH PROVIDER CLASSES and HELPERS
-*  
+*
 *  These classes assist in searching the system index in a handful of lines of code
 */
 namespace searchapi::internal
@@ -84,7 +87,7 @@ namespace searchapi::internal
         return queryStr;
     }
 
-    __forceinline DWORD GetReuseWhereIDFromRowset(const winrt::com_ptr<IRowset>&rowset)
+    __forceinline DWORD GetReuseWhereIDFromRowset(const winrt::com_ptr<IRowset>& rowset)
     {
         winrt::com_ptr<IRowsetInfo> rowsetInfo;
         THROW_IF_FAILED(rowset->QueryInterface(IID_PPV_ARGS(rowsetInfo.put())));
@@ -218,14 +221,48 @@ namespace searchapi
         return unkRowsetPtr.as<IRowset>();
     }
 
+    template <typename Func>
+    void EnumerateRowsWithCallback(
+        _In_ IRowset* rowset,
+        Func callback)
+    {
+        winrt::com_ptr<IGetRow> getRow;
+        THROW_IF_FAILED(rowset->QueryInterface(IID_PPV_ARGS(getRow.put())));
+
+        bool continueFetch = true;
+        DBCOUNTITEM rowCountReturned;
+
+        do
+        {
+            HROW rowBuffer[1000]; // Request enough large batch to increase efficiency
+            HROW* rowReturned = rowBuffer;
+
+            THROW_IF_FAILED(
+                rowset->GetNextRows(DB_NULL_HCHAPTER, 0, ARRAYSIZE(rowBuffer), &rowCountReturned, &rowReturned));
+
+            for (unsigned int i = 0; continueFetch && (i < rowCountReturned); i++)
+            {
+                winrt::com_ptr<IPropertyStore> propStore;
+                winrt::com_ptr<IUnknown> unknown;
+
+                THROW_IF_FAILED(getRow->GetRowFromHROW(nullptr, rowBuffer[i], __uuidof(IPropertyStore), unknown.put()));
+                propStore = unknown.as<IPropertyStore>();
+
+                callback(propStore.get());
+            }
+
+            THROW_IF_FAILED(rowset->ReleaseRows(rowCountReturned, rowReturned, nullptr, nullptr, nullptr));
+        } while (continueFetch && (rowCountReturned > 0));
+    }
+
     struct QueryResult
     {
-
-
+        winrt::Windows::Foundation::Collections::IPropertySet propSet;
+        std::wstring uri;
     };
 
     /* Options for the FileSearchProvider class below.
-    *  
+    *
     *  This class handles things like tokenization options, language, and other common aspects of issuing queries
     *
     */
@@ -238,8 +275,8 @@ namespace searchapi
 
     /* This class is the main class to use to search the system for files based on an input string
     *  It handles performance aspects of using the system indexer
-    *  
-    *  Setting SEARCHPLAT_API_CACHE 1 will speed things up 
+    *
+    *  Setting SEARCHPLAT_API_CACHE 1 will speed things up
     */
     struct FileSearchProvider
     {
@@ -251,7 +288,7 @@ namespace searchapi
         *  Included scopes are file paths that you wish to include. If none are included it defaults to searching all files
         *  Excluded scopes are file paths that you do not want to include in the query. If none are included then only the includedScopes are used
         *  Creates the priming rowset query.
-        * 
+        *
         *  Details:
         *  Typically this is done when a user in an application interacts with a search box experience.
         *  When the user clicks the box, you want to tell the system indexer "hey a query is coming"
@@ -272,6 +309,8 @@ namespace searchapi
         {
             auto rowset = ExecuteQueryUsingPrimingQuery(searchText);
 
+            // Grab the properties and results, and build a vector and return. 
+
             return std::vector<QueryResult>();
         }
 
@@ -279,11 +318,13 @@ namespace searchapi
         {
             auto rowset = ExecuteQueryUsingPrimingQuery(searchText);
 
+
+
             return std::vector<QueryResult>();
         }
 
         /* Executes searching the entire system index with a string using the priming query as the base IRowset
-        *   
+        *
         *  The initial priming query should have been generated via CreateQueryPrimingRowset with included and excluded scopes.
         *  This method then takes in a string and searches across that query.
         *
@@ -304,8 +345,8 @@ namespace searchapi
             winrt::com_ptr<IGetRow> getRow = rowset.as<IGetRow>();
 
             bool continueFetch = true;
-            size_t totalFetched{0};
-            DBCOUNTITEM rowCountReturned{0};
+            size_t totalFetched{ 0 };
+            DBCOUNTITEM rowCountReturned{ 0 };
             do
             {
                 HROW rowBuffer[1000]; // Request enough large batch to increase efficiency
@@ -325,7 +366,5 @@ namespace searchapi
         winrt::com_ptr<IRowset> m_prefetchRowset;
         std::wstring m_prefetchSql;
     };
-
-
-
 }
+
