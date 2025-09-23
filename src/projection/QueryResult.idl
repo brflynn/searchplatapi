@@ -1,0 +1,11 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
+namespace Microsoft.SearchPlatform
+{
+    runtimeclass QueryResult
+    {
+        Windows.Foundation.Collections.IPropertySet PropSet { get; };
+        String Uri { get; };    
+    };
+}

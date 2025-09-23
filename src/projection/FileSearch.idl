@@ -1,0 +1,13 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
+import "QueryResult.idl";
+
+namespace Microsoft.SearchPlatform
+{
+    runtimeclass FileSearch
+    {
+        FileSearch();
+        IVector<QueryResult> Search(String query);
+    };
+}
