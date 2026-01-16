@@ -27,6 +27,15 @@
     <ClCompile Include="SearchAsYouTypeTests.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="SearchPropertyHelperTests.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="SearchQueryBuilderTests.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="SearchTokenizerTests.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="pch.h">

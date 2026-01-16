@@ -96,6 +96,9 @@
     <ClCompile Include="SearchAsYouTypePerformanceTests.cpp" />
     <ClCompile Include="SearchAsYouTypeTests.cpp" />
     <ClCompile Include="SearchPlatCoreTests.cpp" />
+    <ClCompile Include="SearchPropertyHelperTests.cpp" />
+    <ClCompile Include="SearchQueryBuilderTests.cpp" />
+    <ClCompile Include="SearchTokenizerTests.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="pch.h" />
