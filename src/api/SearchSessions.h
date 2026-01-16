@@ -2,6 +2,7 @@
 #pragma once
 
 #include "SearchPlatCore.h"
+#include "SearchSessionPropertyHelpers.h"
 #include <thread>
 #include <mutex>
 #include <atomic>
@@ -13,6 +14,7 @@ namespace wsearch
 
 /* Base class for all search sessions with common functionality
  * Handles scope management and shared search operations
+ * Includes result click tracking for all derived sessions
  */
 class SearchSessionBase : public TelemetryProvider
 {
@@ -25,6 +27,9 @@ protected:
     mutable winrt::com_ptr<IRowset> m_prefetchRowset;
     mutable std::wstring m_prefetchSql;
 
+    // Result click tracking for property updates
+    std::shared_ptr<SearchResultPropertyUpdater> m_propertyUpdater;
+
     SearchSessionBase(
         std::vector<std::wstring> includedScopes,
         std::vector<std::wstring> excludedScopes,
@@ -32,6 +37,7 @@ protected:
         : m_includedScopes(std::move(includedScopes))
         , m_excludedScopes(std::move(excludedScopes))
         , m_additionalProperties(std::move(additionalProperties))
+        , m_propertyUpdater(std::make_shared<SearchResultPropertyUpdater>())
     {
     }
 
@@ -109,10 +115,31 @@ public:
         auto rowset = details::ExecuteQuery(sql);
         return details::GetTotalRowsForRowset(rowset);
     }
+
+    // Call this method when a user clicks on a search result
+    // to track usage and update file properties (System.DateAccessed and System.Document.LineCount)
+    void TrackResultClick(const std::wstring& filePath)
+    {
+        if (m_propertyUpdater)
+        {
+            m_propertyUpdater->OnResultClicked(filePath);
+        }
+    }
+
+    // Get the number of pending property updates
+    size_t GetPendingPropertyUpdates() const
+    {
+        if (m_propertyUpdater)
+        {
+            return m_propertyUpdater->GetPendingUpdateCount();
+        }
+        return 0;
+    }
 };
 
 /* Simple synchronous search session for file searches
  * Provides high performance use of the indexer SQL interface with priming rowset caching
+ * Includes click tracking to update file properties when results are clicked
  */
 struct SearchSession : public SearchSessionBase
 {
@@ -202,6 +229,7 @@ private:
  * - Background thread for query execution
  * - Cached rowset results for quick retrieval
  * - Thread-safe operations
+ * - Click tracking to update file properties when results are clicked
  *
  * Example usage:
  *   wsearch::SearchAsYouTypeSession search({L"C:\\Users\\username\\Documents"});
@@ -209,6 +237,7 @@ private:
  *   search.AppendCharacters(L"s");
  *   auto results = search.GetCachedResults(); // May be null if debouncing
  *   auto results = search.ExecuteQueryNow();  // Force immediate execution
+ *   search.TrackResultClick(L"C:\\Users\\username\\Documents\\report.docx");
  */
 struct SearchAsYouTypeSession : public SearchSessionBase
 {
