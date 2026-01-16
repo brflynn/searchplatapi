@@ -93,10 +93,13 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="SearchAsYouTypePerformanceTests.cpp" />
+    <ClCompile Include="SearchAsYouTypeTests.cpp" />
     <ClCompile Include="SearchPlatCoreTests.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="pch.h" />
+    <ClInclude Include="SearchTestUtilities.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
