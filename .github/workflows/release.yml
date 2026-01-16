@@ -8,6 +8,8 @@ on:
 jobs:
   package-and-publish:
     runs-on: windows-latest
+    permissions:
+      contents: read
     
     steps:
     - name: Checkout code
