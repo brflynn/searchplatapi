@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
+  <metadata>
+    <id>SearchPlatAPI</id>
+    <version>1.0.0</version>
+    <authors>SearchPlatAPI Contributors</authors>
+    <owners>SearchPlatAPI</owners>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <license type="file">LICENSE</license>
+    <projectUrl>https://github.com/brflynn/searchplatapi</projectUrl>
+    <description>Public Wrappers for Common Windows Search Service Platform APIs. These APIs assist developers in programming against the Windows Search Service in a much easier fashion than today.</description>
+    <releaseNotes>Initial release of SearchPlatAPI header files.</releaseNotes>
+    <copyright>Copyright (c) SearchPlatAPI Contributors</copyright>
+    <tags>windows search native cpp headers</tags>
+  </metadata>
+  <files>
+    <file src="LICENSE" target="" />
+    <file src="src/api/*.h" target="build/native/include" />
+  </files>
+</package>
