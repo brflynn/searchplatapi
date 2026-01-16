@@ -1,7 +1,7 @@
 // Copyright (C) Microsoft Corporation. All rights reserved.
 #include "pch.h"
 #include <windows.h>
-#include <FileSearchProvider.h>
+#include <SearchSessions.h>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 using namespace wsearch;
@@ -51,32 +51,33 @@ namespace SearchPlatCoreTests
 
         TEST_METHOD(TestFileSearchProviderPrepareForSearchNoScopes)
         {
-            auto searchProvider = SearchProvider({L"file:"}, std::vector<std::wstring>(), std::vector<std::wstring>());
+            auto session = wsearch::SearchSession({L"file:"}, std::vector<std::wstring>(), std::vector<std::wstring>());
         }
 
         TEST_METHOD(TestFileSearchProviderPrepareForSearch)
         {
             std::vector<std::wstring> includedScopes = {
                 GetKnownFolderScope(FOLDERID_Documents), GetKnownFolderScope(FOLDERID_Desktop)};
-            auto searchProvider = SearchProvider(includedScopes, std::vector<std::wstring>(), std::vector<std::wstring>());
+            auto session = wsearch::SearchSession(includedScopes, std::vector<std::wstring>(), std::vector<std::wstring>());
         }
 
         TEST_METHOD(TestFileSearchProviderIssueQuery)
         {
             std::vector<std::wstring> includedScopes = {
                 GetKnownFolderScope(FOLDERID_Documents), GetKnownFolderScope(FOLDERID_Desktop)};
-            auto searchProvider = SearchProvider(includedScopes, std::vector<std::wstring>(), std::vector<std::wstring>());
-            auto results = searchProvider.Search(L"Foo");
+            auto session = wsearch::SearchSession(includedScopes, std::vector<std::wstring>(), std::vector<std::wstring>());
+            auto results = session.Search(L"Foo");
 
             Assert::AreEqual(static_cast<unsigned long>(GetTotalRowsForRowset(results)), 0ul);
         }
 
         TEST_METHOD(TestFileCountInIndex)
         {
-            auto searchProvider =
-                SearchProvider(std::vector<std::wstring>(), std::vector<std::wstring>(), std::vector<std::wstring>());
+            auto session =
+                wsearch::SearchSession(std::vector<std::wstring>(), std::vector<std::wstring>(), std::vector<std::wstring>());
 
-            Assert::IsTrue(searchProvider.GetTotalFilesInIndex() >= 0);
+            Assert::IsTrue(session.GetTotalFilesInIndex() >= 0);
         }
     };
 }
+

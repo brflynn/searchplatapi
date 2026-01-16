@@ -292,26 +292,33 @@ namespace details
 
     inline size_t GetTotalRowsForRowset(winrt::com_ptr<IRowset> const& rowset)
     {
-        wsearch::TelemetryProvider::LogInfo(L"Counting total rows in rowset");
-        winrt::com_ptr<IGetRow> getRow = rowset.as<IGetRow>();
-
-        bool continueFetch = true;
-        size_t totalFetched{ 0 };
-        DBCOUNTITEM rowCountReturned{ 0 };
-        do
+        wsearch::TelemetryProvider::LogInfo(L"Getting total rows from rowset using MSIDXSPROP_RESULTS_FOUND");
+        
+        // Query the MSIDXSPROP_RESULTS_FOUND property from the rowset
+        winrt::com_ptr<IRowsetInfo> rowsetInfo = rowset.as<IRowsetInfo>();
+        
+        DBPROPID resultsPropId = MSIDXSPROP_RESULTS_FOUND;
+        DBPROPIDSET propidset;
+        propidset.rgPropertyIDs = &resultsPropId;
+        propidset.cPropertyIDs = 1;
+        propidset.guidPropertySet = DBPROPSET_MSIDXS_ROWSETEXT;
+        
+        ULONG cPropertySets = 0;
+        DBPROPSET* rgPropertySets = nullptr;
+        
+        THROW_IF_FAILED(rowsetInfo->GetProperties(1, &propidset, &cPropertySets, &rgPropertySets));
+        
+        wil::unique_cotaskmem_ptr<DBPROP> sprgProps(rgPropertySets->rgProperties);
+        wil::unique_cotaskmem_ptr<DBPROPSET> sprgPropSets(rgPropertySets);
+        
+        size_t totalRows = 0;
+        if (rgPropertySets->rgProperties->vValue.vt == VT_I4)
         {
-            HROW rowBuffer[1000]; // Request enough large batch to increase efficiency
-            HROW* rowReturned = rowBuffer;
-
-            THROW_IF_FAILED(
-                rowset->GetNextRows(DB_NULL_HCHAPTER, 0, ARRAYSIZE(rowBuffer), &rowCountReturned, &rowReturned));
-            THROW_IF_FAILED(ULongLongAdd(totalFetched, rowCountReturned, &totalFetched));
-
-            THROW_IF_FAILED(rowset->ReleaseRows(rowCountReturned, rowReturned, nullptr, nullptr, nullptr));
-        } while (continueFetch && (rowCountReturned > 0));
-
-        wsearch::TelemetryProvider::LogInfo(L"Total rows counted: %zu", totalFetched);
-        return totalFetched;
+            totalRows = static_cast<size_t>(rgPropertySets->rgProperties->vValue.lVal);
+        }
+        
+        wsearch::TelemetryProvider::LogInfo(L"Total rows found: %zu", totalRows);
+        return totalRows;
     }
 
     // Simple helper to execute a query against the indexer

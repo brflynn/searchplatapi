@@ -2,7 +2,7 @@
 #include "pch.h"
 #include <windows.h>
 
-#include <SearchAsYouType.h>
+#include <SearchSessions.h>
 #include <SearchPlatCore.h>
 #include "SearchTestUtilities.h"
 #include <thread>
@@ -20,10 +20,10 @@ namespace SearchAsYouTypeTests
     public:
         TEST_METHOD(TestBasicConstruction)
         {
-            Logger::WriteMessage(L"Testing basic SearchAsYouType construction");
+            Logger::WriteMessage(L"Testing basic SearchAsYouTypeSession construction");
             
             std::vector<std::wstring> scopes = { GetKnownFolderScope(FOLDERID_Documents) };
-            SearchAsYouType search(scopes);
+            SearchAsYouTypeSession search(scopes);
             
             Assert::AreEqual(search.GetSearchText(), std::wstring(L""));
             Assert::IsFalse(search.IsQueryPending());
@@ -34,7 +34,7 @@ namespace SearchAsYouTypeTests
             Logger::WriteMessage(L"Testing SetSearchText functionality");
             
             std::vector<std::wstring> scopes = { GetKnownFolderScope(FOLDERID_Documents) };
-            SearchAsYouType search(scopes);
+            SearchAsYouTypeSession search(scopes);
             
             search.SetSearchText(L"test");
             Assert::AreEqual(search.GetSearchText(), std::wstring(L"test"));
@@ -51,7 +51,7 @@ namespace SearchAsYouTypeTests
             Logger::WriteMessage(L"Testing AppendCharacters functionality");
             
             std::vector<std::wstring> scopes = { GetKnownFolderScope(FOLDERID_Documents) };
-            SearchAsYouType search(scopes);
+            SearchAsYouTypeSession search(scopes);
             
             search.SetSearchText(L"doc");
             search.AppendCharacters(L"ument");
@@ -67,7 +67,7 @@ namespace SearchAsYouTypeTests
             Logger::WriteMessage(L"Testing Clear functionality");
             
             std::vector<std::wstring> scopes = { GetKnownFolderScope(FOLDERID_Documents) };
-            SearchAsYouType search(scopes);
+            SearchAsYouTypeSession search(scopes);
             
             search.SetSearchText(L"test");
             auto results1 = search.GetCachedResults();
@@ -86,7 +86,7 @@ namespace SearchAsYouTypeTests
             Logger::WriteMessage(L"Testing ExecuteQueryNow (bypass debouncing)");
             
             std::vector<std::wstring> scopes = { GetKnownFolderScope(FOLDERID_Documents) };
-            SearchAsYouType search(scopes);
+            SearchAsYouTypeSession search(scopes);
             
             search.SetSearchText(L"report");
             
@@ -119,7 +119,7 @@ namespace SearchAsYouTypeTests
             
             std::vector<std::wstring> scopes = { GetKnownFolderScope(FOLDERID_Documents) };
             std::chrono::milliseconds debounceDelay(100); // Use 100ms for easier testing
-            SearchAsYouType search(scopes, {}, {}, debounceDelay);
+            SearchAsYouTypeSession search(scopes, {}, {}, debounceDelay);
             
             LARGE_INTEGER frequency;
             QueryPerformanceFrequency(&frequency);
@@ -150,7 +150,7 @@ namespace SearchAsYouTypeTests
             
             std::vector<std::wstring> scopes = { GetKnownFolderScope(FOLDERID_Documents) };
             std::chrono::milliseconds debounceDelay(100);
-            SearchAsYouType search(scopes, {}, {}, debounceDelay);
+            SearchAsYouTypeSession search(scopes, {}, {}, debounceDelay);
             
             // Simulate typing "report" character by character with small delays
             const wchar_t* text = L"report";
@@ -182,7 +182,7 @@ namespace SearchAsYouTypeTests
             
             std::vector<std::wstring> scopes = { GetKnownFolderScope(FOLDERID_Documents) };
             std::chrono::milliseconds debounceDelay(150);
-            SearchAsYouType search(scopes, {}, {}, debounceDelay);
+            SearchAsYouTypeSession search(scopes, {}, {}, debounceDelay);
             
             // Rapidly update text multiple times
             search.SetSearchText(L"a");
@@ -209,7 +209,7 @@ namespace SearchAsYouTypeTests
             Logger::WriteMessage(L"Testing dynamic debounce delay changes");
             
             std::vector<std::wstring> scopes = { GetKnownFolderScope(FOLDERID_Documents) };
-            SearchAsYouType search(scopes, {}, {}, std::chrono::milliseconds(50));
+            SearchAsYouTypeSession search(scopes, {}, {}, std::chrono::milliseconds(50));
             
             // Change the debounce delay
             search.SetDebounceDelay(std::chrono::milliseconds(200));
@@ -240,7 +240,7 @@ namespace SearchAsYouTypeTests
                 GetKnownFolderScope(FOLDERID_Desktop)
             };
             
-            SearchAsYouType search(scopes);
+            SearchAsYouTypeSession search(scopes);
             
             search.SetSearchText(L"file");
             auto results = search.GetCachedResults();
@@ -259,7 +259,7 @@ namespace SearchAsYouTypeTests
                 L"System.DateModified"
             };
             
-            SearchAsYouType search(scopes, {}, additionalProps);
+            SearchAsYouTypeSession search(scopes, {}, additionalProps);
             
             search.SetSearchText(L"document");
             auto results = search.GetCachedResults();
@@ -272,7 +272,7 @@ namespace SearchAsYouTypeTests
             Logger::WriteMessage(L"Testing search with empty text");
             
             std::vector<std::wstring> scopes = { GetKnownFolderScope(FOLDERID_Documents) };
-            SearchAsYouType search(scopes);
+            SearchAsYouTypeSession search(scopes);
             
             search.SetSearchText(L"");
             auto results = search.GetCachedResults();
@@ -286,7 +286,7 @@ namespace SearchAsYouTypeTests
             Logger::WriteMessage(L"Testing QueryPerformanceCounter timing accuracy");
             
             std::vector<std::wstring> scopes = { GetKnownFolderScope(FOLDERID_Documents) };
-            SearchAsYouType search(scopes);
+            SearchAsYouTypeSession search(scopes);
             
             // Execute multiple queries and verify timing information
             for (int i = 0; i < 3; ++i)
@@ -307,7 +307,7 @@ namespace SearchAsYouTypeTests
             Logger::WriteMessage(L"Testing thread-safe concurrent access");
             
             std::vector<std::wstring> scopes = { GetKnownFolderScope(FOLDERID_Documents) };
-            SearchAsYouType search(scopes, {}, {}, std::chrono::milliseconds(100));
+            SearchAsYouTypeSession search(scopes, {}, {}, std::chrono::milliseconds(100));
             
             // Start multiple threads that update search text
             std::thread t1([&search]() {
@@ -329,3 +329,4 @@ namespace SearchAsYouTypeTests
         }
     };
 }
+

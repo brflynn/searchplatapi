@@ -194,12 +194,12 @@ namespace SearchTestUtilities
                static_cast<double>(frequency.QuadPart);
     }
 
-    // Create a SearchAsYouType instance with test folder scope
-    inline wsearch::SearchAsYouType CreateTestSearchInstance(
+    // Create a SearchAsYouTypeSession instance with test folder scope
+    inline wsearch::SearchAsYouTypeSession CreateTestSearchInstance(
         const std::wstring& testFolderPath,
         std::chrono::milliseconds debounceDelay = std::chrono::milliseconds(50))
     {
         std::vector<std::wstring> scopes = { testFolderPath };
-        return wsearch::SearchAsYouType(scopes, {}, {}, debounceDelay);
+        return wsearch::SearchAsYouTypeSession(scopes, {}, {}, debounceDelay);
     }
 }

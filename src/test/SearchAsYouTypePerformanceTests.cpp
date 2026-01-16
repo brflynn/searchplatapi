@@ -2,7 +2,7 @@
 #include "pch.h"
 #include <windows.h>
 
-#include <SearchAsYouType.h>
+#include <SearchSessions.h>
 #include <SearchPlatCore.h>
 #include "SearchTestUtilities.h"
 #include <thread>
@@ -25,7 +25,7 @@ namespace SearchAsYouTypePerformanceTests
         TEST_CLASS_INITIALIZE(ClassSetup)
         {
             Logger::WriteMessage(L"========================================");
-            Logger::WriteMessage(L"SearchAsYouType Performance Test Suite");
+            Logger::WriteMessage(L"SearchAsYouTypeSession Performance Test Suite");
             Logger::WriteMessage(L"========================================");
             
             Logger::WriteMessage(L"Creating test files for performance testing...");
@@ -65,7 +65,7 @@ namespace SearchAsYouTypePerformanceTests
         {
             Logger::WriteMessage(L"PERFORMANCE TEST: Basic Search");
             
-            SearchAsYouType search = CreateTestSearchInstance(m_testFolderPath);
+            SearchAsYouTypeSession search = CreateTestSearchInstance(m_testFolderPath);
             
             search.SetSearchText(L"project");
             auto results = search.GetCachedResults();
@@ -78,7 +78,7 @@ namespace SearchAsYouTypePerformanceTests
         {
             Logger::WriteMessage(L"PERFORMANCE TEST: Immediate Execution");
             
-            SearchAsYouType search = CreateTestSearchInstance(m_testFolderPath);
+            SearchAsYouTypeSession search = CreateTestSearchInstance(m_testFolderPath);
             
             search.SetSearchText(L"report");
             
@@ -100,7 +100,7 @@ namespace SearchAsYouTypePerformanceTests
         {
             Logger::WriteMessage(L"PERFORMANCE TEST: Multiple Sequential Queries");
             
-            SearchAsYouType search = CreateTestSearchInstance(m_testFolderPath);
+            SearchAsYouTypeSession search = CreateTestSearchInstance(m_testFolderPath);
             
             std::vector<std::wstring> searchTerms = {L"project", L"meeting", L"budget", L"employee", L"technical"};
             
@@ -118,3 +118,4 @@ namespace SearchAsYouTypePerformanceTests
     std::wstring SearchAsYouTypePerformanceTests::m_testFolderPath;
     std::vector<TestFileInfo> SearchAsYouTypePerformanceTests::m_testFiles;
 }
+
