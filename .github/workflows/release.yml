@@ -1,0 +1,39 @@
+name: Release to NuGet
+
+on:
+  push:
+    branches:
+      - release
+
+jobs:
+  package-and-publish:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup NuGet
+      uses: nuget/setup-nuget@v2.0.0
+    
+    - name: Get version from nuspec
+      id: get_version
+      shell: pwsh
+      run: |
+        [xml]$nuspec = Get-Content SearchPlatAPI.nuspec
+        $version = $nuspec.package.metadata.version
+        echo "version=$version" >> $env:GITHUB_OUTPUT
+    
+    - name: Pack NuGet package
+      run: nuget pack SearchPlatAPI.nuspec -Version ${{ steps.get_version.outputs.version }}
+    
+    - name: Push to NuGet
+      run: nuget push *.nupkg -Source https://api.nuget.org/v3/index.json -ApiKey ${{ secrets.NUGET_API_KEY }} -SkipDuplicate
+      
+    - name: Upload package as artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: nuget-package
+        path: '*.nupkg'
