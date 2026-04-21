@@ -1,0 +1,11 @@
+namespace SearchApp
+{
+    runtimeclass SearchResultItem
+    {
+        SearchResultItem();
+        String DisplayName{ get; };
+        String FilePath{ get; };
+        Boolean IsFolder{ get; };
+        Microsoft.UI.Xaml.Media.Imaging.BitmapImage ItemImage{ get; };
+    }
+}

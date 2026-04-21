@@ -1,0 +1,10 @@
+import "SearchResultItem.idl";
+
+namespace SearchApp
+{
+    [default_interface]
+    runtimeclass MainWindow : Microsoft.UI.Xaml.Window
+    {
+        MainWindow();
+    }
+}
