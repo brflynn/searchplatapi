@@ -7,9 +7,11 @@
 
 #include "SearchResultItem.h"
 #include "IconCache.h"
+#include "MatchKindClassifier.h"
 #include <SearchSessions.h>
 #include <SearchResult.h>
 #include <shellapi.h>
+#include <unordered_set>
 
 using namespace winrt;
 using namespace winrt::Microsoft::UI::Xaml;
@@ -21,6 +23,42 @@ namespace
 {
     IconCache g_iconCache;
     constexpr int MaxResults = 50;
+
+    // Case-insensitive, backslash-normalized key used to dedupe a result
+    // that both the indexer and the local index produced for the same file.
+    std::wstring NormalizePathKey(std::wstring path)
+    {
+        for (auto& c : path)
+        {
+            c = static_cast<wchar_t>(towlower(c));
+            if (c == L'/') c = L'\\';
+        }
+        return path;
+    }
+
+    SearchApp::MatchKind ToWinRtMatchKind(applocal::ClassifiedMatchKind kind)
+    {
+        switch (kind)
+        {
+        case applocal::ClassifiedMatchKind::Metadata: return SearchApp::MatchKind::Metadata;
+        case applocal::ClassifiedMatchKind::Content:  return SearchApp::MatchKind::Content;
+        case applocal::ClassifiedMatchKind::Filename:
+        default:                                      return SearchApp::MatchKind::Filename;
+        }
+    }
+
+    // A source-agnostic intermediate result used to merge the indexer's
+    // fast-path hits with the LocalIndex's full-filesystem hits by path
+    // before materializing WinRT SearchResultItem objects (so a path
+    // present in both sources only loads one thumbnail and keeps the
+    // higher-priority MatchKind - Filename > Metadata > Content).
+    struct MergedResult
+    {
+        std::wstring name;
+        std::wstring path;
+        bool isFolder = false;
+        applocal::ClassifiedMatchKind matchKind = applocal::ClassifiedMatchKind::Filename;
+    };
 
     // Enumerate up to maxResults rows from a rowset, calling callback for each
     void EnumerateTopNResults(IRowset* rowset, int maxResults,
@@ -44,7 +82,7 @@ namespace
             for (DBCOUNTITEM i = 0; (i < rowCountReturned) && (count < maxResults); i++)
             {
                 winrt::com_ptr<IPropertyStore> propStore;
-                winrt::com_ptr<IUnknown> unknown;
+                winrt::com_ptr<::IUnknown> unknown;
 
                 THROW_IF_FAILED(getRow->GetRowFromHROW(
                     nullptr, rowBuffer[i], __uuidof(IPropertyStore), unknown.put()));
@@ -78,16 +116,38 @@ namespace winrt::SearchApp::implementation
                 Microsoft::UI::Windowing::AppWindowPresenterKind::FullScreen);
         }
 
-        // Initialize the search session over all indexed files
+        // Initialize the search session over all indexed files. Also request
+        // Title/Author/Keywords/Comment so MatchKind classification can
+        // cheaply confirm metadata hits (see MatchKindClassifier.h) without
+        // any change to SearchQueryBuilder/SearchSessions.
         try
         {
             m_searchSession = std::make_unique<wsearch::SearchAsYouTypeSession>(
-                std::vector<std::wstring>{ L"file:" }
+                std::vector<std::wstring>{ L"file:" },
+                std::vector<std::wstring>{},
+                std::vector<std::wstring>{
+                    L"System.Title", L"System.Author", L"System.Keywords", L"System.Comment" }
             );
         }
         catch (...)
         {
             StatusText().Text(L"Failed to initialize Windows Search indexer session.");
+        }
+
+        // Initialize the "true index" full-filesystem background indexer.
+        // This is additive/best-effort: if the on-disk index can't be
+        // opened (e.g. no write access to %LOCALAPPDATA%), search silently
+        // falls back to indexer-only results exactly as before this feature.
+        try
+        {
+            m_localIndex = std::make_shared<applocal::LocalIndex>(applocal::LocalIndex::DefaultDbPath());
+            m_backgroundIndexer = std::make_unique<applocal::BackgroundIndexer>(m_localIndex);
+            m_backgroundIndexer->Start();
+        }
+        catch (...)
+        {
+            m_localIndex.reset();
+            m_backgroundIndexer.reset();
         }
 
         // Auto-focus the search box
@@ -172,6 +232,7 @@ namespace winrt::SearchApp::implementation
         if (m_queryGeneration != generation || !m_searchSession)
             co_return;
 
+        bool searchFailed = false;
         try
         {
             LARGE_INTEGER startTime, endTime, freq;
@@ -185,38 +246,90 @@ namespace winrt::SearchApp::implementation
             double queryMs = static_cast<double>(endTime.QuadPart - startTime.QuadPart)
                 * 1000.0 / static_cast<double>(freq.QuadPart);
 
-            if (!rowset || m_queryGeneration != generation)
+            if (m_queryGeneration != generation)
+                co_return;
+
+            // --- Fast path: Windows Search indexer (unchanged behavior) ---
+            std::vector<MergedResult> merged;
+            std::unordered_set<std::wstring> seenPathKeys;
+
+            if (rowset)
+            {
+                EnumerateTopNResults(rowset.get(), MaxResults,
+                    [&](IPropertyStore* ps)
+                    {
+                        if (m_queryGeneration != generation) return;
+
+                        winrt::com_ptr<IPropertyStore> propStoreCopy;
+                        propStoreCopy.copy_from(ps);
+                        wsearch::SearchResult sr(std::move(propStoreCopy));
+                        auto name = sr.GetFileName();
+                        auto path = sr.GetFilePathForTracking();
+                        bool isFolder = sr.IsFolder();
+
+                        if (name.empty() || path.empty()) return;
+
+                        auto pathKey = NormalizePathKey(path);
+                        if (!seenPathKeys.insert(pathKey).second) return;
+
+                        auto matchKind = applocal::ClassifyIndexerMatch(
+                            sr.GetRank(), searchText,
+                            applocal::MetadataFields{
+                                sr.GetTitle(), sr.GetAuthor(), sr.GetKeywords(), sr.GetComment() });
+
+                        merged.push_back(MergedResult{ std::move(name), std::move(path), isFolder, matchKind });
+                    });
+            }
+
+            // --- "True index" full-filesystem local search, merged in by
+            // path. Only fills in files the indexer's fast path didn't
+            // already return (its metadata/thumbnail is preferred when a
+            // path comes from both sources). ---
+            if (m_localIndex && merged.size() < MaxResults)
+            {
+                auto localResults = m_localIndex->Search(
+                    searchText, static_cast<uint32_t>(MaxResults - merged.size()));
+
+                for (auto& lr : localResults)
+                {
+                    if (m_queryGeneration != generation) break;
+
+                    auto pathKey = NormalizePathKey(lr.path);
+                    if (!seenPathKeys.insert(pathKey).second) continue;
+
+                    auto matchKind = (lr.matchKind == applocal::LocalMatchKind::Filename)
+                        ? applocal::ClassifiedMatchKind::Filename
+                        : applocal::ClassifiedMatchKind::Content;
+
+                    merged.push_back(MergedResult{ lr.name, lr.path, lr.isFolder, matchKind });
+
+                    if (merged.size() >= MaxResults) break;
+                }
+            }
+
+            if (m_queryGeneration != generation)
                 co_return;
 
             auto items = winrt::single_threaded_observable_vector<IInspectable>();
-            int resultCount = 0;
+            for (auto& mr : merged)
+            {
+                if (m_queryGeneration != generation) break;
 
-            EnumerateTopNResults(rowset.get(), MaxResults,
-                [&](IPropertyStore* ps)
-                {
-                    if (m_queryGeneration != generation) return;
+                // Get thumbnail from the per-extension icon cache (works
+                // identically for indexer- and local-index-only results).
+                auto thumbnail = g_iconCache.GetOrLoadThumbnail(mr.path, mr.isFolder);
 
-                    winrt::com_ptr<IPropertyStore> propStoreCopy;
-                    propStoreCopy.copy_from(ps);
-                    wsearch::SearchResult sr(std::move(propStoreCopy));
-                    auto name = sr.GetFileName();
-                    auto path = sr.GetFilePathForTracking();
-                    bool isFolder = sr.IsFolder();
+                auto item = winrt::make<implementation::SearchResultItem>(
+                    winrt::hstring(mr.name),
+                    winrt::hstring(mr.path),
+                    mr.isFolder,
+                    thumbnail,
+                    ToWinRtMatchKind(mr.matchKind)
+                );
+                items.Append(item);
+            }
 
-                    if (name.empty() || path.empty()) return;
-
-                    // Get thumbnail from the per-extension icon cache
-                    auto thumbnail = g_iconCache.GetOrLoadThumbnail(path, isFolder);
-
-                    auto item = winrt::make<implementation::SearchResultItem>(
-                        winrt::hstring(name),
-                        winrt::hstring(path),
-                        isFolder,
-                        thumbnail
-                    );
-                    items.Append(item);
-                    resultCount++;
-                });
+            int resultCount = static_cast<int>(merged.size());
 
             co_await ui_thread;
 
@@ -233,6 +346,11 @@ namespace winrt::SearchApp::implementation
             StatusText().Text(winrt::hstring(status));
         }
         catch (...)
+        {
+            searchFailed = true;
+        }
+
+        if (searchFailed)
         {
             co_await ui_thread;
             StatusText().Text(L"Search error");

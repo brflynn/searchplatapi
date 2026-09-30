@@ -9,6 +9,9 @@
 #include <atomic>
 #include <memory>
 
+#include "LocalIndex.h"
+#include "BackgroundIndexer.h"
+
 namespace winrt::SearchApp::implementation
 {
     struct MainWindow : MainWindowT<MainWindow>
@@ -34,6 +37,14 @@ namespace winrt::SearchApp::implementation
 
         std::unique_ptr<wsearch::SearchAsYouTypeSession> m_searchSession;
         std::atomic<uint32_t> m_queryGeneration{ 0 };
+
+        // "True index" full-filesystem search (superset of whatever the
+        // Windows Search indexer covers). Queried alongside m_searchSession
+        // on every keystroke and merged by path in ExecuteSearchAsync; may
+        // be null if the on-disk index couldn't be opened, in which case
+        // search silently falls back to indexer-only results.
+        std::shared_ptr<applocal::LocalIndex> m_localIndex;
+        std::unique_ptr<applocal::BackgroundIndexer> m_backgroundIndexer;
     };
 }
 

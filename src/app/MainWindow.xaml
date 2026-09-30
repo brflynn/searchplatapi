@@ -65,6 +65,7 @@
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="28"/>
                             <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
@@ -84,6 +85,18 @@
                                    FontSize="11"
                                    Foreground="#99FFFFFF"
                                    TextTrimming="CharacterEllipsis"/>
+                        <!-- Match provenance badge: NAME/META/TEXT per
+                             MatchKind, colored via MatchKindBrush -->
+                        <Border Grid.Column="2" Grid.RowSpan="2"
+                                Background="{x:Bind MatchKindBrush}"
+                                CornerRadius="4"
+                                Padding="6,2"
+                                VerticalAlignment="Center">
+                            <TextBlock Text="{x:Bind MatchKindLabel}"
+                                       FontSize="10"
+                                       FontWeight="SemiBold"
+                                       Foreground="#FFFFFFFF"/>
+                        </Border>
                     </Grid>
                 </DataTemplate>
             </ListView.ItemTemplate>
