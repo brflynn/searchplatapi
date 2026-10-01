@@ -31,6 +31,7 @@
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Storage.Streams.h>
+#include <winrt/Windows.UI.h>
 
 // WinUI3 projections (needed so consume_* templates for controls/windowing are
 // fully defined before MainWindow.xaml.cpp/App.xaml.cpp call into them)

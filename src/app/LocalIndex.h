@@ -131,7 +131,9 @@ namespace applocal
         void RunMigrations();
 
         sqlite3* m_write = nullptr;
-        sqlite3* m_read = nullptr;
+        sqlite3* m_read = nullptr;         // interactive search
+        sqlite3* m_contentRead = nullptr;  // background content freshness checks
+        sqlite3* m_statsRead = nullptr;    // dashboard/root status
         mutable std::recursive_mutex m_writeMutex;
     };
 }

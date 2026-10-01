@@ -4,6 +4,7 @@
 
 #include <windows.h>
 #include <atomic>
+#include <thread>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 using namespace applocal;
@@ -284,6 +285,95 @@ namespace LocalIndexTests
             Assert::AreEqual(static_cast<uint64_t>(0), statistics.folders);
             Assert::AreEqual(static_cast<uint64_t>(0), statistics.contentIndexedFiles);
 
+            DeleteFileW(dbPath.c_str());
+        }
+    };
+
+    TEST_CLASS(LocalIndexConcurrencyTests)
+    {
+    public:
+        TEST_METHOD(TestSearchStatisticsContentChecksAndWritesCanRunTogether)
+        {
+            auto dbPath = MakeTempDbPath();
+            LocalIndex index(dbPath);
+            index.UpsertFile(
+                L"C:\\seed.txt", L"seed.txt", L"C:\\", false,
+                4, 0, 1, 1, 1, 1);
+            index.UpsertContent(L"C:\\seed.txt", { L"seed content" }, 1, 4, false);
+
+            std::atomic<bool> failed{ false };
+            auto guard = [&](auto operation)
+            {
+                try
+                {
+                    operation();
+                }
+                catch (...)
+                {
+                    failed.store(true);
+                }
+            };
+
+            std::thread searchThread([&]
+            {
+                guard([&]
+                {
+                    for (int i = 0; i < 100; ++i)
+                    {
+                        auto results = index.Search(L"seed", 20);
+                        if (!ContainsPath(results, L"C:\\seed.txt"))
+                        {
+                            failed.store(true);
+                        }
+                    }
+                });
+            });
+            std::thread statisticsThread([&]
+            {
+                guard([&]
+                {
+                    for (int i = 0; i < 100; ++i)
+                    {
+                        if (index.GetStatistics().totalItems == 0)
+                        {
+                            failed.store(true);
+                        }
+                    }
+                });
+            });
+            std::thread contentThread([&]
+            {
+                guard([&]
+                {
+                    for (int i = 0; i < 100; ++i)
+                    {
+                        if (!index.IsContentUpToDate(L"C:\\seed.txt", 1, 4))
+                        {
+                            failed.store(true);
+                        }
+                    }
+                });
+            });
+            std::thread writerThread([&]
+            {
+                guard([&]
+                {
+                    for (int i = 0; i < 100; ++i)
+                    {
+                        auto name = L"background-" + std::to_wstring(i) + L".txt";
+                        index.UpsertFile(
+                            L"C:\\" + name, name, L"C:\\", false,
+                            static_cast<uint64_t>(i), 0, 1, i + 2, 1, 2);
+                    }
+                });
+            });
+
+            searchThread.join();
+            statisticsThread.join();
+            contentThread.join();
+            writerThread.join();
+
+            Assert::IsFalse(failed.load());
             DeleteFileW(dbPath.c_str());
         }
     };

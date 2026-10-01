@@ -8,11 +8,13 @@
     mc:Ignorable="d"
     Title="Search">
 
-    <Grid Background="#FF0D0D14">
+    <Grid x:Name="LayoutRoot"
+          Background="#FF0D0D14"
+          SizeChanged="LayoutRoot_SizeChanged">
         <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="*"/>
-            <ColumnDefinition Width="700"/>
-            <ColumnDefinition Width="*"/>
+            <ColumnDefinition x:Name="LeftLayoutColumn" Width="*"/>
+            <ColumnDefinition x:Name="CenterLayoutColumn" Width="700"/>
+            <ColumnDefinition x:Name="RightLayoutColumn" Width="*"/>
         </Grid.ColumnDefinitions>
         <Grid.RowDefinitions>
             <RowDefinition Height="48"/>
@@ -34,8 +36,8 @@
                  PlaceholderText="Type to search files..."
                  TextChanged="SearchTextBox_TextChanged"
                  KeyDown="SearchTextBox_KeyDown"
-                 HorizontalAlignment="Center"
-                 Width="680"
+                 HorizontalAlignment="Stretch"
+                 MaxWidth="680"
                  FontSize="22"
                  Padding="16,12"
                  CornerRadius="8"
@@ -45,8 +47,8 @@
         <TextBlock Grid.Row="2"
                    Grid.ColumnSpan="3"
                    x:Name="StatusText"
-                   HorizontalAlignment="Center"
-                   Width="680"
+                   HorizontalAlignment="Stretch"
+                   MaxWidth="680"
                    Margin="0,10,0,0"
                    FontSize="12"
                    Foreground="#FF7E7E8E"/>
@@ -54,6 +56,7 @@
         <!-- Live background-index status -->
         <Border Grid.Row="3"
                 Grid.Column="0"
+                x:Name="LeftStatusPanel"
                 HorizontalAlignment="Right"
                 VerticalAlignment="Top"
                 Width="250"
@@ -118,8 +121,7 @@
                   Grid.Column="1"
                   x:Name="SearchResults"
                   DoubleTapped="SearchResults_DoubleTapped"
-                  HorizontalAlignment="Center"
-                  Width="700"
+                  HorizontalAlignment="Stretch"
                   SelectionMode="Single"
                   Background="Transparent"
                   Margin="0,8,0,16"
@@ -178,6 +180,7 @@
         <!-- Persisted index totals -->
         <Border Grid.Row="3"
                 Grid.Column="2"
+                x:Name="RightStatusPanel"
                 HorizontalAlignment="Left"
                 VerticalAlignment="Top"
                 Width="250"

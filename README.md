@@ -95,7 +95,12 @@ existing icon/thumbnail, filename, and path:
 
 All existing interactions (Enter to open, Escape to clear/close, arrow-down
 to focus the list, double-tap to open) and the app's look and feel (dark
-theme, centered search box, fullscreen results list) are unchanged.
+theme, centered search box) are preserved. The window starts maximized but
+uses the standard resizable/minimizable/maximizable presenter with
+high-contrast caption buttons. At widths below 1240 effective pixels the
+side status cards collapse and the result list/search box use the available
+width. Ctrl+Shift+F is registered globally: it hides the app when the app is
+foreground, or restores, clears, and focuses search otherwise.
 
 ### Tests
 
@@ -104,4 +109,7 @@ theme, centered search box, fullscreen results list) are unchanged.
 incremental mtime-skip, scan-generation deletion sweep, transactions),
 `BackgroundIndexerTests.cpp` (content extension allow-list, binary-file
 sniffing), and `MatchKindClassifierTests.cpp` (rank-tier and metadata-match
-classification logic).
+classification logic). After building the x64 Debug app, run
+`src\test\SearchAppUiSmokeTests.ps1` locally in an interactive desktop
+session to exercise the real search box, UI-thread responsiveness, narrow/
+wide resize behavior, and the global Ctrl+Shift+F hotkey.

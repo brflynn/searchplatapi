@@ -183,22 +183,31 @@ namespace applocal
                 WideCharToMultiByte(CP_UTF8, 0, dbPath.c_str(), -1, utf8Path.data(), needed, nullptr, nullptr);
             }
         }
-        if (sqlite3_open_v2(utf8Path.c_str(), &m_read, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK)
+        auto openReadConnection = [&](sqlite3** connection)
         {
-            if (m_read)
+            if (sqlite3_open_v2(
+                utf8Path.c_str(), connection, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK)
             {
-                sqlite3_close(m_read);
-                m_read = nullptr;
+                if (*connection)
+                {
+                    sqlite3_close(*connection);
+                    *connection = nullptr;
+                }
             }
-        }
-        if (m_read)
-        {
-            sqlite3_busy_timeout(m_read, 5000);
-        }
+            if (*connection)
+            {
+                sqlite3_busy_timeout(*connection, 5000);
+            }
+        };
+        openReadConnection(&m_read);
+        openReadConnection(&m_contentRead);
+        openReadConnection(&m_statsRead);
     }
 
     LocalIndex::~LocalIndex()
     {
+        if (m_statsRead) sqlite3_close(m_statsRead);
+        if (m_contentRead) sqlite3_close(m_contentRead);
         if (m_read) sqlite3_close(m_read);
         if (m_write) sqlite3_close(m_write);
     }
@@ -411,11 +420,12 @@ namespace applocal
 
     bool LocalIndex::IsContentUpToDate(const std::wstring& path, int64_t mtime, uint64_t size) const
     {
-        if (!m_read)
+        sqlite3* connection = m_contentRead ? m_contentRead : m_read;
+        if (!connection)
         {
             return false;
         }
-        Stmt stmt(m_read, L"SELECT mtime, size FROM content_meta WHERE path = ?1;");
+        Stmt stmt(connection, L"SELECT mtime, size FROM content_meta WHERE path = ?1;");
         stmt.BindText(1, path);
         if (stmt.Step() == SQLITE_ROW)
         {
@@ -514,11 +524,12 @@ namespace applocal
     std::vector<ScanRootStatus> LocalIndex::GetScanRoots() const
     {
         std::vector<ScanRootStatus> roots;
-        if (!m_read)
+        sqlite3* connection = m_statsRead ? m_statsRead : m_read;
+        if (!connection)
         {
             return roots;
         }
-        Stmt stmt(m_read, L"SELECT root, status, last_full_scan, files_scanned FROM scan_roots;");
+        Stmt stmt(connection, L"SELECT root, status, last_full_scan, files_scanned FROM scan_roots;");
         while (stmt.Step() == SQLITE_ROW)
         {
             ScanRootStatus s;
@@ -534,12 +545,13 @@ namespace applocal
     IndexStatistics LocalIndex::GetStatistics() const
     {
         IndexStatistics statistics;
-        if (!m_read)
+        sqlite3* connection = m_statsRead ? m_statsRead : m_read;
+        if (!connection)
         {
             return statistics;
         }
 
-        Stmt stmt(m_read,
+        Stmt stmt(connection,
             L"SELECT "
             L"  COUNT(*), "
             L"  COALESCE(SUM(CASE WHEN is_folder = 0 THEN 1 ELSE 0 END), 0), "

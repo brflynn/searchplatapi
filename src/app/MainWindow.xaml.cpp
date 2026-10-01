@@ -134,15 +134,50 @@ namespace winrt::SearchApp::implementation
     {
         InitializeComponent();
 
-        // Extend content into title bar for immersive overlay look
+        // Keep the immersive custom title bar, but use an overlapped
+        // presenter so restore/resize/minimize/maximize work normally.
         ExtendsContentIntoTitleBar(true);
         SetTitleBar(AppTitleBar());
 
-        // Go full screen
         if (auto appWindow = this->AppWindow())
         {
             appWindow.SetPresenter(
-                Microsoft::UI::Windowing::AppWindowPresenterKind::FullScreen);
+                Microsoft::UI::Windowing::AppWindowPresenterKind::Overlapped);
+            if (auto presenter = appWindow.Presenter().try_as<
+                Microsoft::UI::Windowing::OverlappedPresenter>())
+            {
+                presenter.Maximize();
+            }
+
+            auto titleBar = appWindow.TitleBar();
+            titleBar.ButtonBackgroundColor(Windows::UI::Color{ 255, 13, 13, 20 });
+            titleBar.ButtonForegroundColor(Windows::UI::Color{ 255, 255, 255, 255 });
+            titleBar.ButtonInactiveBackgroundColor(Windows::UI::Color{ 255, 13, 13, 20 });
+            titleBar.ButtonInactiveForegroundColor(Windows::UI::Color{ 255, 150, 150, 160 });
+            titleBar.ButtonHoverBackgroundColor(Windows::UI::Color{ 255, 58, 58, 74 });
+            titleBar.ButtonHoverForegroundColor(Windows::UI::Color{ 255, 255, 255, 255 });
+            titleBar.ButtonPressedBackgroundColor(Windows::UI::Color{ 255, 82, 82, 102 });
+            titleBar.ButtonPressedForegroundColor(Windows::UI::Color{ 255, 255, 255, 255 });
+
+            m_windowHandle = Microsoft::UI::GetWindowFromWindowId(appWindow.Id());
+            auto module = GetModuleHandleW(nullptr);
+            constexpr wchar_t HotkeyWindowClass[] = L"SearchAppHotkeyMessageWindow";
+            WNDCLASSW windowClass{};
+            windowClass.lpfnWndProc = HotkeyWindowProc;
+            windowClass.hInstance = module;
+            windowClass.lpszClassName = HotkeyWindowClass;
+            if (RegisterClassW(&windowClass) || GetLastError() == ERROR_CLASS_ALREADY_EXISTS)
+            {
+                m_hotkeyWindow = CreateWindowExW(
+                    0, HotkeyWindowClass, L"", 0,
+                    0, 0, 0, 0, HWND_MESSAGE, nullptr, module, this);
+                if (m_hotkeyWindow)
+                {
+                    m_hotkeyRegistered = RegisterHotKey(
+                        m_hotkeyWindow, GlobalSearchHotkeyId,
+                        MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, 'F') != FALSE;
+                }
+            }
         }
 
         // Initialize the search session over all indexed files. Also request
@@ -179,18 +214,36 @@ namespace winrt::SearchApp::implementation
             m_backgroundIndexer.reset();
         }
 
+        m_searchDebounceTimer = DispatcherQueue().CreateTimer();
+        m_searchDebounceTimer.Interval(std::chrono::milliseconds(150));
+        m_searchDebounceTimer.IsRepeating(false);
+        auto weakThis = get_weak();
+        m_searchDebounceTimer.Tick([weakThis](auto&&, auto&&)
+        {
+            if (auto strongThis = weakThis.get())
+            {
+                strongThis->ExecuteSearchAsync(
+                    strongThis->m_pendingSearchText,
+                    strongThis->m_pendingSearchGeneration);
+            }
+        });
+
         m_indexStatusTimer = DispatcherQueue().CreateTimer();
         m_indexStatusTimer.Interval(std::chrono::seconds(1));
-        auto weakThis = get_weak();
         m_indexStatusTimer.Tick([weakThis](auto&&, auto&&)
         {
             if (auto strongThis = weakThis.get())
             {
-                strongThis->UpdateIndexStatus();
+                strongThis->UpdateIndexerProgress();
+                if (++strongThis->m_indexStatusTick % 5 == 0)
+                {
+                    strongThis->UpdateIndexStatisticsAsync();
+                }
             }
         });
         m_indexStatusTimer.Start();
-        UpdateIndexStatus();
+        UpdateIndexerProgress();
+        UpdateIndexStatisticsAsync();
 
         // Auto-focus the search box
         SearchTextBox().Loaded([this](auto&&, auto&&)
@@ -199,61 +252,155 @@ namespace winrt::SearchApp::implementation
         });
     }
 
-    void MainWindow::UpdateIndexStatus()
+    MainWindow::~MainWindow()
     {
-        if (!m_localIndex || !m_backgroundIndexer)
+        if (m_searchDebounceTimer)
+        {
+            m_searchDebounceTimer.Stop();
+        }
+        if (m_indexStatusTimer)
+        {
+            m_indexStatusTimer.Stop();
+        }
+        if (m_hotkeyWindow)
+        {
+            if (m_hotkeyRegistered)
+            {
+                UnregisterHotKey(m_hotkeyWindow, GlobalSearchHotkeyId);
+            }
+            DestroyWindow(m_hotkeyWindow);
+        }
+    }
+
+    void MainWindow::UpdateIndexerProgress()
+    {
+        if (!m_backgroundIndexer)
         {
             IndexerStateText().Text(L"Unavailable");
             CurrentIndexPathText().Text(L"The local index could not be opened.");
             return;
         }
 
+        auto progress = m_backgroundIndexer->GetProgress();
+        std::wstring stateText;
+        switch (progress.state)
+        {
+        case applocal::IndexerState::Running:
+            stateText = L"Indexing";
+            break;
+        case applocal::IndexerState::Paused:
+            stateText = L"Paused";
+            break;
+        case applocal::IndexerState::Stopped:
+        default:
+            stateText = L"Idle";
+            break;
+        }
+
+        IndexerStateText().Text(stateText);
+        SessionScannedText().Text(FormatCount(progress.filesScanned));
+        IndexElapsedText().Text(FormatElapsed(progress.elapsed));
+        CurrentIndexPathText().Text(progress.currentPath.empty()
+            ? L"Waiting for scan work..."
+            : progress.currentPath);
+    }
+
+    IAsyncAction MainWindow::UpdateIndexStatisticsAsync()
+    {
+        if (!m_localIndex || m_indexStatisticsRefreshInFlight.exchange(true))
+        {
+            co_return;
+        }
+
+        auto lifetime = get_strong();
+        auto resetInFlight = wil::scope_exit([this]
+        {
+            m_indexStatisticsRefreshInFlight.store(false);
+        });
+        apartment_context uiThread;
+
+        applocal::IndexStatistics statistics;
+        std::vector<applocal::ScanRootStatus> roots;
+        bool succeeded = false;
+        co_await resume_background();
         try
         {
-            auto progress = m_backgroundIndexer->GetProgress();
-            auto statistics = m_localIndex->GetStatistics();
-            auto roots = m_localIndex->GetScanRoots();
+            statistics = m_localIndex->GetStatistics();
+            roots = m_localIndex->GetScanRoots();
+            succeeded = true;
+        }
+        catch (...)
+        {
+        }
+
+        co_await uiThread;
+        if (succeeded)
+        {
             auto completedRoots = static_cast<uint64_t>(std::count_if(
                 roots.begin(), roots.end(), [](const applocal::ScanRootStatus& root)
                 {
                     return root.status == L"done";
                 }));
-
-            std::wstring stateText;
-            switch (progress.state)
-            {
-            case applocal::IndexerState::Running:
-                stateText = L"Indexing";
-                break;
-            case applocal::IndexerState::Paused:
-                stateText = L"Paused";
-                break;
-            case applocal::IndexerState::Stopped:
-            default:
-                stateText = !roots.empty() && completedRoots == roots.size()
-                    ? L"Up to date"
-                    : L"Idle";
-                break;
-            }
-
-            IndexerStateText().Text(stateText);
-            SessionScannedText().Text(FormatCount(progress.filesScanned));
-            IndexElapsedText().Text(FormatElapsed(progress.elapsed));
-            CurrentIndexPathText().Text(progress.currentPath.empty()
-                ? L"Waiting for scan work..."
-                : progress.currentPath);
-
             TotalIndexedItemsText().Text(FormatCount(statistics.totalItems));
             IndexedFilesText().Text(FormatCount(statistics.files));
             IndexedFoldersText().Text(FormatCount(statistics.folders));
             ContentIndexedFilesText().Text(FormatCount(statistics.contentIndexedFiles));
             IndexedVolumesText().Text(
                 FormatCount(completedRoots) + L" / " + FormatCount(roots.size()));
+
+            if (m_backgroundIndexer->GetProgress().state == applocal::IndexerState::Stopped &&
+                !roots.empty() && completedRoots == roots.size())
+            {
+                IndexerStateText().Text(L"Up to date");
+            }
         }
-        catch (...)
+        else
         {
             IndexerStateText().Text(L"Status unavailable");
         }
+    }
+
+    void MainWindow::ToggleFromHotkey()
+    {
+        if (!m_windowHandle)
+        {
+            return;
+        }
+
+        if (IsWindowVisible(m_windowHandle) && GetForegroundWindow() == m_windowHandle)
+        {
+            ShowWindow(m_windowHandle, SW_HIDE);
+            return;
+        }
+
+        ShowWindow(m_windowHandle, IsIconic(m_windowHandle) ? SW_RESTORE : SW_SHOW);
+        SetForegroundWindow(m_windowHandle);
+        BringWindowToTop(m_windowHandle);
+        SearchTextBox().Text(L"");
+        SearchResults().ItemsSource(nullptr);
+        StatusText().Text(L"");
+        SearchTextBox().Focus(FocusState::Programmatic);
+    }
+
+    LRESULT CALLBACK MainWindow::HotkeyWindowProc(
+        HWND window, UINT message, WPARAM wParam, LPARAM lParam)
+    {
+        if (message == WM_NCCREATE)
+        {
+            auto create = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            SetWindowLongPtrW(
+                window, GWLP_USERDATA,
+                reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+        }
+
+        auto self = reinterpret_cast<MainWindow*>(
+            GetWindowLongPtrW(window, GWLP_USERDATA));
+        if (self && message == WM_HOTKEY && wParam == GlobalSearchHotkeyId)
+        {
+            self->ToggleFromHotkey();
+            return 0;
+        }
+        return DefWindowProcW(window, message, wParam, lParam);
     }
 
     void MainWindow::SearchTextBox_TextChanged(
@@ -261,6 +408,10 @@ namespace winrt::SearchApp::implementation
     {
         auto text = std::wstring(SearchTextBox().Text());
         auto gen = ++m_queryGeneration;
+        if (m_searchDebounceTimer)
+        {
+            m_searchDebounceTimer.Stop();
+        }
 
         if (text.empty())
         {
@@ -269,7 +420,41 @@ namespace winrt::SearchApp::implementation
             return;
         }
 
-        ExecuteSearchAsync(std::move(text), gen);
+        m_pendingSearchText = std::move(text);
+        m_pendingSearchGeneration = gen;
+        if (m_searchDebounceTimer)
+        {
+            m_searchDebounceTimer.Start();
+        }
+    }
+
+    void MainWindow::LayoutRoot_SizeChanged(
+        IInspectable const&, SizeChangedEventArgs const& args)
+    {
+        bool compact = args.NewSize().Width < 1240.0;
+        auto visibility = compact ? Visibility::Collapsed : Visibility::Visible;
+        LeftStatusPanel().Visibility(visibility);
+        RightStatusPanel().Visibility(visibility);
+
+        if (compact)
+        {
+            LeftLayoutColumn().Width(GridLengthHelper::FromPixels(0));
+            CenterLayoutColumn().Width(
+                GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+            RightLayoutColumn().Width(GridLengthHelper::FromPixels(0));
+            SearchTextBox().Margin(Thickness{ 24, 20, 24, 0 });
+            StatusText().Margin(Thickness{ 24, 10, 24, 0 });
+        }
+        else
+        {
+            LeftLayoutColumn().Width(
+                GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+            CenterLayoutColumn().Width(GridLengthHelper::FromPixels(700));
+            RightLayoutColumn().Width(
+                GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+            SearchTextBox().Margin(Thickness{ 0, 20, 0, 0 });
+            StatusText().Margin(Thickness{ 0, 10, 0, 0 });
+        }
     }
 
     void MainWindow::SearchTextBox_KeyDown(

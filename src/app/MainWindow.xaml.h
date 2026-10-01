@@ -17,6 +17,7 @@ namespace winrt::SearchApp::implementation
     struct MainWindow : MainWindowT<MainWindow>
     {
         MainWindow();
+        ~MainWindow();
 
         void SearchTextBox_TextChanged(
             Windows::Foundation::IInspectable const& sender,
@@ -30,9 +31,19 @@ namespace winrt::SearchApp::implementation
             Windows::Foundation::IInspectable const& sender,
             Microsoft::UI::Xaml::Input::DoubleTappedRoutedEventArgs const& args);
 
+        void LayoutRoot_SizeChanged(
+            Windows::Foundation::IInspectable const& sender,
+            Microsoft::UI::Xaml::SizeChangedEventArgs const& args);
+
     private:
+        static constexpr int GlobalSearchHotkeyId = 1;
+
         void OpenSelectedResult();
-        void UpdateIndexStatus();
+        void UpdateIndexerProgress();
+        Windows::Foundation::IAsyncAction UpdateIndexStatisticsAsync();
+        void ToggleFromHotkey();
+        static LRESULT CALLBACK HotkeyWindowProc(
+            HWND window, UINT message, WPARAM wParam, LPARAM lParam);
         Windows::Foundation::IAsyncAction ExecuteSearchAsync(
             std::wstring searchText, uint32_t generation);
 
@@ -46,7 +57,15 @@ namespace winrt::SearchApp::implementation
         // search silently falls back to indexer-only results.
         std::shared_ptr<applocal::LocalIndex> m_localIndex;
         std::unique_ptr<applocal::BackgroundIndexer> m_backgroundIndexer;
+        Microsoft::UI::Dispatching::DispatcherQueueTimer m_searchDebounceTimer{ nullptr };
         Microsoft::UI::Dispatching::DispatcherQueueTimer m_indexStatusTimer{ nullptr };
+        std::atomic<bool> m_indexStatisticsRefreshInFlight{ false };
+        uint32_t m_indexStatusTick = 0;
+        std::wstring m_pendingSearchText;
+        uint32_t m_pendingSearchGeneration = 0;
+        HWND m_windowHandle = nullptr;
+        HWND m_hotkeyWindow = nullptr;
+        bool m_hotkeyRegistered = false;
     };
 }
 
