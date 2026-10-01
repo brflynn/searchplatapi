@@ -11,6 +11,7 @@
 #include <SearchSessions.h>
 #include <SearchResult.h>
 #include <shellapi.h>
+#include <algorithm>
 #include <unordered_set>
 
 using namespace winrt;
@@ -23,6 +24,34 @@ namespace
 {
     IconCache g_iconCache;
     constexpr int MaxResults = 50;
+
+    std::wstring FormatCount(uint64_t value)
+    {
+        std::wstring text = std::to_wstring(value);
+        for (size_t position = text.size(); position > 3; position -= 3)
+        {
+            text.insert(position - 3, 1, L',');
+        }
+        return text;
+    }
+
+    std::wstring FormatElapsed(std::chrono::milliseconds elapsed)
+    {
+        auto totalSeconds = std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
+        auto hours = totalSeconds / 3600;
+        auto minutes = (totalSeconds % 3600) / 60;
+        auto seconds = totalSeconds % 60;
+
+        if (hours > 0)
+        {
+            return std::to_wstring(hours) + L"h " + std::to_wstring(minutes) + L"m";
+        }
+        if (minutes > 0)
+        {
+            return std::to_wstring(minutes) + L"m " + std::to_wstring(seconds) + L"s";
+        }
+        return std::to_wstring(seconds) + L"s";
+    }
 
     // Case-insensitive, backslash-normalized key used to dedupe a result
     // that both the indexer and the local index produced for the same file.
@@ -150,11 +179,81 @@ namespace winrt::SearchApp::implementation
             m_backgroundIndexer.reset();
         }
 
+        m_indexStatusTimer = DispatcherQueue().CreateTimer();
+        m_indexStatusTimer.Interval(std::chrono::seconds(1));
+        auto weakThis = get_weak();
+        m_indexStatusTimer.Tick([weakThis](auto&&, auto&&)
+        {
+            if (auto strongThis = weakThis.get())
+            {
+                strongThis->UpdateIndexStatus();
+            }
+        });
+        m_indexStatusTimer.Start();
+        UpdateIndexStatus();
+
         // Auto-focus the search box
         SearchTextBox().Loaded([this](auto&&, auto&&)
         {
             SearchTextBox().Focus(FocusState::Programmatic);
         });
+    }
+
+    void MainWindow::UpdateIndexStatus()
+    {
+        if (!m_localIndex || !m_backgroundIndexer)
+        {
+            IndexerStateText().Text(L"Unavailable");
+            CurrentIndexPathText().Text(L"The local index could not be opened.");
+            return;
+        }
+
+        try
+        {
+            auto progress = m_backgroundIndexer->GetProgress();
+            auto statistics = m_localIndex->GetStatistics();
+            auto roots = m_localIndex->GetScanRoots();
+            auto completedRoots = static_cast<uint64_t>(std::count_if(
+                roots.begin(), roots.end(), [](const applocal::ScanRootStatus& root)
+                {
+                    return root.status == L"done";
+                }));
+
+            std::wstring stateText;
+            switch (progress.state)
+            {
+            case applocal::IndexerState::Running:
+                stateText = L"Indexing";
+                break;
+            case applocal::IndexerState::Paused:
+                stateText = L"Paused";
+                break;
+            case applocal::IndexerState::Stopped:
+            default:
+                stateText = !roots.empty() && completedRoots == roots.size()
+                    ? L"Up to date"
+                    : L"Idle";
+                break;
+            }
+
+            IndexerStateText().Text(stateText);
+            SessionScannedText().Text(FormatCount(progress.filesScanned));
+            IndexElapsedText().Text(FormatElapsed(progress.elapsed));
+            CurrentIndexPathText().Text(progress.currentPath.empty()
+                ? L"Waiting for scan work..."
+                : progress.currentPath);
+
+            TotalIndexedItemsText().Text(FormatCount(statistics.totalItems));
+            IndexedFilesText().Text(FormatCount(statistics.files));
+            IndexedFoldersText().Text(FormatCount(statistics.folders));
+            ContentIndexedFilesText().Text(FormatCount(statistics.contentIndexedFiles));
+            IndexedVolumesText().Text(
+                FormatCount(completedRoots) + L" / " + FormatCount(roots.size()));
+        }
+        catch (...)
+        {
+            IndexerStateText().Text(L"Status unavailable");
+        }
     }
 
     void MainWindow::SearchTextBox_TextChanged(

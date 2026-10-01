@@ -66,7 +66,10 @@ limited to whatever the Windows Search indexer has chosen to scope
   (USN journal / directory-change-notification incremental updates are a
   possible future enhancement, not implemented in v1.)
 - The indexer exposes start/stop/pause and a progress snapshot (files
-  scanned, current path, elapsed time).
+  scanned, current path, elapsed time). SearchApp displays that live worker
+  status in a left-side card and persisted totals (all items, files, folders,
+  content-indexed files, and completed volumes) in a right-side card; both
+  refresh once per second without blocking search.
 
 ### Unified query + match provenance
 

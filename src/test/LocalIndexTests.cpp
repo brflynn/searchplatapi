@@ -251,6 +251,43 @@ namespace LocalIndexTests
         }
     };
 
+    TEST_CLASS(IndexStatisticsTests)
+    {
+    public:
+        TEST_METHOD(TestStatisticsCountItemsFilesFoldersAndContent)
+        {
+            auto dbPath = MakeTempDbPath();
+            LocalIndex index(dbPath);
+
+            index.UpsertFile(L"C:\\docs", L"docs", L"C:\\", true, 0, 0, 1, 1, 1, 1);
+            index.UpsertFile(L"C:\\docs\\one.txt", L"one.txt", L"C:\\docs", false, 3, 0, 1, 1, 1, 1);
+            index.UpsertFile(L"C:\\docs\\two.bin", L"two.bin", L"C:\\docs", false, 4, 0, 1, 1, 1, 1);
+            index.UpsertContent(L"C:\\docs\\one.txt", { L"one" }, 1, 3, false);
+
+            auto statistics = index.GetStatistics();
+            Assert::AreEqual(static_cast<uint64_t>(3), statistics.totalItems);
+            Assert::AreEqual(static_cast<uint64_t>(2), statistics.files);
+            Assert::AreEqual(static_cast<uint64_t>(1), statistics.folders);
+            Assert::AreEqual(static_cast<uint64_t>(1), statistics.contentIndexedFiles);
+
+            DeleteFileW(dbPath.c_str());
+        }
+
+        TEST_METHOD(TestEmptyIndexStatisticsAreZero)
+        {
+            auto dbPath = MakeTempDbPath();
+            LocalIndex index(dbPath);
+
+            auto statistics = index.GetStatistics();
+            Assert::AreEqual(static_cast<uint64_t>(0), statistics.totalItems);
+            Assert::AreEqual(static_cast<uint64_t>(0), statistics.files);
+            Assert::AreEqual(static_cast<uint64_t>(0), statistics.folders);
+            Assert::AreEqual(static_cast<uint64_t>(0), statistics.contentIndexedFiles);
+
+            DeleteFileW(dbPath.c_str());
+        }
+    };
+
     TEST_CLASS(TransactionTests)
     {
     public:

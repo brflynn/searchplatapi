@@ -47,6 +47,14 @@ namespace applocal
         uint64_t filesScanned = 0;
     };
 
+    struct IndexStatistics
+    {
+        uint64_t totalItems = 0;
+        uint64_t files = 0;
+        uint64_t folders = 0;
+        uint64_t contentIndexedFiles = 0;
+    };
+
     // Thin RAII wrapper around the on-disk SQLite/FTS5 index. Owns a single
     // writer connection (serialized via m_writeMutex - BackgroundIndexer is
     // the only writer) and a second, independent read-only connection so
@@ -108,6 +116,7 @@ namespace applocal
 
         void SetScanRootStatus(const std::wstring& root, const std::wstring& status, int64_t lastFullScan, uint64_t filesScanned);
         std::vector<ScanRootStatus> GetScanRoots() const;
+        IndexStatistics GetStatistics() const;
 
         // Batches many Upsert* calls into a single SQLite transaction (huge
         // throughput win for a full-volume walk vs. one implicit transaction

@@ -531,6 +531,33 @@ namespace applocal
         return roots;
     }
 
+    IndexStatistics LocalIndex::GetStatistics() const
+    {
+        IndexStatistics statistics;
+        if (!m_read)
+        {
+            return statistics;
+        }
+
+        Stmt stmt(m_read,
+            L"SELECT "
+            L"  COUNT(*), "
+            L"  COALESCE(SUM(CASE WHEN is_folder = 0 THEN 1 ELSE 0 END), 0), "
+            L"  COALESCE(SUM(CASE WHEN is_folder != 0 THEN 1 ELSE 0 END), 0), "
+            L"  (SELECT COUNT(*) FROM content_meta) "
+            L"FROM files;");
+
+        if (stmt.Step() == SQLITE_ROW)
+        {
+            statistics.totalItems = static_cast<uint64_t>(stmt.ColumnInt64(0));
+            statistics.files = static_cast<uint64_t>(stmt.ColumnInt64(1));
+            statistics.folders = static_cast<uint64_t>(stmt.ColumnInt64(2));
+            statistics.contentIndexedFiles = static_cast<uint64_t>(stmt.ColumnInt64(3));
+        }
+
+        return statistics;
+    }
+
     void LocalIndex::BeginTransaction()
     {
         // Held until EndTransaction(); safe to re-enter from nested

@@ -32,6 +32,7 @@ namespace winrt::SearchApp::implementation
 
     private:
         void OpenSelectedResult();
+        void UpdateIndexStatus();
         Windows::Foundation::IAsyncAction ExecuteSearchAsync(
             std::wstring searchText, uint32_t generation);
 
@@ -45,6 +46,7 @@ namespace winrt::SearchApp::implementation
         // search silently falls back to indexer-only results.
         std::shared_ptr<applocal::LocalIndex> m_localIndex;
         std::unique_ptr<applocal::BackgroundIndexer> m_backgroundIndexer;
+        Microsoft::UI::Dispatching::DispatcherQueueTimer m_indexStatusTimer{ nullptr };
     };
 }
 
