@@ -30,6 +30,24 @@
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.Storage.Streams.h>
+#include <winrt/Windows.UI.h>
+
+// WinUI3 projections (needed so consume_* templates for controls/windowing are
+// fully defined before MainWindow.xaml.cpp/App.xaml.cpp call into them)
+#pragma push_macro("GetCurrentTime")
+#undef GetCurrentTime
+#include <winrt/Microsoft.UI.Xaml.h>
+#include <winrt/Microsoft.UI.Xaml.Controls.h>
+#include <winrt/Microsoft.UI.Xaml.Controls.Primitives.h>
+#include <winrt/Microsoft.UI.Xaml.Markup.h>
+#include <winrt/Microsoft.UI.Xaml.Navigation.h>
+#include <winrt/Microsoft.UI.Xaml.Input.h>
+#include <winrt/Microsoft.UI.Xaml.Media.Imaging.h>
+#include <winrt/Microsoft.UI.Dispatching.h>
+#include <winrt/Microsoft.UI.Windowing.h>
+#include <winrt/Microsoft.UI.Interop.h>
+#pragma pop_macro("GetCurrentTime")
 
 // WIL
 #include <wil/resource.h>

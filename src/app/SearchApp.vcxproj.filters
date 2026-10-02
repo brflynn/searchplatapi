@@ -24,13 +24,22 @@
     <ClCompile Include="main.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="App.cpp">
+    <ClCompile Include="App.xaml.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="MainWindow.cpp">
+    <ClCompile Include="MainWindow.xaml.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="SearchResultItem.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\sqlite\sqlite3.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="LocalIndex.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="BackgroundIndexer.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
@@ -38,10 +47,10 @@
     <ClInclude Include="pch.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="App.h">
+    <ClInclude Include="App.xaml.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="MainWindow.h">
+    <ClInclude Include="MainWindow.xaml.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="SearchResultItem.h">
@@ -50,11 +59,25 @@
     <ClInclude Include="IconCache.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="thirdparty\sqlite\sqlite3.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="LocalIndex.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="BackgroundIndexer.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <Midl Include="App.idl">
-      <Filter>IDL</Filter>
-    </Midl>
+    <ApplicationDefinition Include="App.xaml">
+      <Filter>Source Files</Filter>
+    </ApplicationDefinition>
+    <Page Include="MainWindow.xaml">
+      <Filter>Source Files</Filter>
+    </Page>
+  </ItemGroup>
+  <ItemGroup>
     <Midl Include="MainWindow.idl">
       <Filter>IDL</Filter>
     </Midl>

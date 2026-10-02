@@ -1,5 +1,20 @@
 namespace SearchApp
 {
+    // How a result matched the query. Derived per-source in
+    // MainWindow.xaml.cpp's ExecuteSearchAsync / MergeResults:
+    //  - Filename : indexer System.Search.Rank filename tier, or a
+    //               LocalIndex files_fts hit.
+    //  - Metadata : indexer-only - query text found in Title/Author/
+    //               Keywords/Comment via wsearch::SearchResult accessors.
+    //  - Content  : indexer System.Search.Rank content tier, or a
+    //               LocalIndex content_fts hit.
+    enum MatchKind
+    {
+        Filename,
+        Metadata,
+        Content,
+    };
+
     runtimeclass SearchResultItem
     {
         SearchResultItem();
@@ -7,5 +22,8 @@ namespace SearchApp
         String FilePath{ get; };
         Boolean IsFolder{ get; };
         Microsoft.UI.Xaml.Media.Imaging.BitmapImage ItemImage{ get; };
+        MatchKind ResultMatchKind{ get; };
+        String MatchKindLabel{ get; };
+        Microsoft.UI.Xaml.Media.Brush MatchKindBrush{ get; };
     }
 }

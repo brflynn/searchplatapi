@@ -1,5 +1,5 @@
 #pragma once
-#include "App.g.h"
+#include "App.xaml.g.h"
 
 namespace winrt::SearchApp::implementation
 {
@@ -13,3 +13,4 @@ namespace winrt::SearchApp::implementation
         winrt::Microsoft::UI::Xaml::Window window{ nullptr };
     };
 }
+

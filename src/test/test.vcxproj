@@ -99,6 +99,21 @@
     <ClCompile Include="SearchPropertyHelperTests.cpp" />
     <ClCompile Include="SearchQueryBuilderTests.cpp" />
     <ClCompile Include="SearchTokenizerTests.cpp" />
+    <ClCompile Include="MatchKindClassifierTests.cpp" />
+    <ClCompile Include="LocalIndexTests.cpp" />
+    <ClCompile Include="BackgroundIndexerTests.cpp" />
+    <ClCompile Include="..\app\thirdparty\sqlite\sqlite3.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions>SQLITE_ENABLE_FTS5;SQLITE_THREADSAFE=1;SQLITE_DEFAULT_MEMSTATUS=0;SQLITE_OMIT_LOAD_EXTENSION;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <ObjectFileName>$(IntDir)test_sqlite3.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\app\LocalIndex.cpp">
+      <ObjectFileName>$(IntDir)test_LocalIndex.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\app\BackgroundIndexer.cpp">
+      <ObjectFileName>$(IntDir)test_BackgroundIndexer.obj</ObjectFileName>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="pch.h" />

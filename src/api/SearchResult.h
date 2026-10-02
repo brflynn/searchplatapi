@@ -27,8 +27,8 @@ class SearchResult
 {
 public:
     SearchResult(IPropertyStore* propStore)
-        : m_propStore(propStore)
     {
+        m_propStore.copy_from(propStore);
     }
 
     SearchResult(winrt::com_ptr<IPropertyStore> propStore)
