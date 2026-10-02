@@ -4,6 +4,7 @@
 
 #include <stdexcept>
 #include <windows.h>
+#include <wil/resource.h>
 
 namespace applocal
 {
@@ -149,6 +150,14 @@ namespace applocal
 
     LocalIndex::LocalIndex(std::wstring dbPath)
     {
+        auto cleanup = wil::scope_exit([this]
+        {
+            if (m_settings) sqlite3_close(m_settings);
+            if (m_statsRead) sqlite3_close(m_statsRead);
+            if (m_contentRead) sqlite3_close(m_contentRead);
+            if (m_read) sqlite3_close(m_read);
+            if (m_write) sqlite3_close(m_write);
+        });
         // Ensure the parent directory exists (e.g. %LOCALAPPDATA%\SearchApp).
         size_t slash = dbPath.find_last_of(L"\\/");
         if (slash != std::wstring::npos)
@@ -202,10 +211,15 @@ namespace applocal
         openReadConnection(&m_read);
         openReadConnection(&m_contentRead);
         openReadConnection(&m_statsRead);
+        if (sqlite3_open16(dbPath.c_str(), &m_settings) != SQLITE_OK)
+            throw std::runtime_error("failed to open settings connection");
+        sqlite3_busy_timeout(m_settings, 5000);
+        cleanup.release();
     }
 
     LocalIndex::~LocalIndex()
     {
+        if (m_settings) sqlite3_close(m_settings);
         if (m_statsRead) sqlite3_close(m_statsRead);
         if (m_contentRead) sqlite3_close(m_contentRead);
         if (m_read) sqlite3_close(m_read);
@@ -297,10 +311,104 @@ namespace applocal
             "  last_full_scan INTEGER,"
             "  files_scanned INTEGER NOT NULL DEFAULT 0"
             ");");
+        ExecOrThrow(m_write,
+            "CREATE TABLE IF NOT EXISTS exclusions ("
+            "kind TEXT NOT NULL CHECK(kind IN ('folder','extension')), value TEXT NOT NULL,"
+            "PRIMARY KEY(kind,value));"
+            "CREATE TABLE IF NOT EXISTS content_scopes ("
+            "folder TEXT PRIMARY KEY, state TEXT NOT NULL, detail TEXT NOT NULL);");
+        ExecOrThrow(m_write,
+            "CREATE TABLE IF NOT EXISTS scan_sequence (id INTEGER PRIMARY KEY CHECK(id=1), generation INTEGER NOT NULL);"
+            "INSERT OR IGNORE INTO scan_sequence(id,generation) "
+            "SELECT 1,COALESCE(MAX(last_seen_scan),0) FROM files "
+            "WHERE NOT EXISTS(SELECT 1 FROM scan_sequence WHERE id=1);");
     }
 
     std::vector<LocalSearchResult> LocalIndex::Search(const std::wstring& queryText, uint32_t maxResults) const
     {
+        return Search(queryText, maxResults, GetSettings());
+    }
+
+    IndexSettings LocalIndex::GetSettings() const
+    {
+        std::lock_guard lock(m_settingsMutex);
+        IndexSettings settings;
+        Stmt rules(m_settings, L"SELECT kind,value FROM exclusions ORDER BY kind,value;");
+        while (rules.Step() == SQLITE_ROW)
+            settings.exclusions.push_back({ rules.ColumnText(0), rules.ColumnText(1) });
+        Stmt scopes(m_settings, L"SELECT folder,state,detail FROM content_scopes ORDER BY folder;");
+        while (scopes.Step() == SQLITE_ROW)
+            settings.contentScopes.push_back({ scopes.ColumnText(0), scopes.ColumnText(1), scopes.ColumnText(2) });
+        return settings;
+    }
+
+    namespace
+    {
+        std::wstring NormalizeRule(const std::wstring& kind, const std::wstring& value)
+        {
+            if (kind == L"folder") return NormalizeFolder(value);
+            if (kind != L"extension" || value.size() < 2 || value.front() != L'.' ||
+                value.find_first_of(L"\\/:*?\"<>| .", 1) != std::wstring::npos)
+                throw std::invalid_argument("Invalid extension exclusion");
+            std::wstring result = value;
+            CharLowerBuffW(result.data(), static_cast<DWORD>(result.size()));
+            return result;
+        }
+    }
+
+    void LocalIndex::AddExclusion(const std::wstring& kind, const std::wstring& value)
+    {
+        auto canonical = NormalizeRule(kind, value);
+        std::lock_guard lock(m_settingsMutex);
+        Stmt stmt(m_settings, L"INSERT OR IGNORE INTO exclusions(kind,value) VALUES(?1,?2);");
+        stmt.BindText(1, kind);
+        stmt.BindText(2, canonical);
+        stmt.Step();
+    }
+
+    void LocalIndex::RemoveExclusion(const std::wstring& kind, const std::wstring& value)
+    {
+        auto canonical = NormalizeRule(kind, value);
+        std::lock_guard lock(m_settingsMutex);
+        Stmt stmt(m_settings, L"DELETE FROM exclusions WHERE kind=?1 AND value=?2;");
+        stmt.BindText(1, kind);
+        stmt.BindText(2, canonical);
+        stmt.Step();
+    }
+
+    void LocalIndex::SetContentScope(const ContentScope& scope)
+    {
+        auto folder = NormalizeFolder(scope.folder);
+        std::lock_guard lock(m_settingsMutex);
+        Stmt stmt(m_settings, L"INSERT INTO content_scopes(folder,state,detail) VALUES(?1,?2,?3) "
+            L"ON CONFLICT(folder) DO UPDATE SET state=excluded.state,detail=excluded.detail;");
+        stmt.BindText(1, folder);
+        stmt.BindText(2, scope.state);
+        stmt.BindText(3, scope.detail);
+        stmt.Step();
+    }
+
+    void LocalIndex::ForgetContentScope(const std::wstring& folder)
+    {
+        auto canonical = NormalizeFolder(folder);
+        std::lock_guard lock(m_settingsMutex);
+        Stmt stmt(m_settings, L"DELETE FROM content_scopes WHERE folder=?1;");
+        stmt.BindText(1, canonical);
+        stmt.Step();
+    }
+
+    void LocalIndex::RecoverInterruptedScopeRequests()
+    {
+        std::lock_guard lock(m_settingsMutex);
+        ExecOrThrow(m_settings, "UPDATE content_scopes SET state='cancelled',"
+            "detail='Previous session ended before an outcome was saved. Scope may already be included; retry to check. No Windows scope rules were undone.' "
+            "WHERE state='pending';");
+    }
+
+    std::vector<LocalSearchResult> LocalIndex::Search(const std::wstring& queryText, uint32_t maxResults,
+        const IndexSettings& settings) const
+    {
+        std::lock_guard lock(m_searchMutex);
         std::vector<LocalSearchResult> results;
         if (queryText.empty() || !m_read)
         {
@@ -323,21 +431,20 @@ namespace applocal
             return false;
         };
 
-        try
         {
             // Filename hits first.
             Stmt nameStmt(m_read,
                 L"SELECT f.path, f.name, f.is_folder, f.size, f.date_created, f.date_modified "
                 L"FROM files_fts JOIN files f ON f.id = files_fts.rowid "
-                L"WHERE files_fts MATCH ?1 ORDER BY bm25(files_fts) LIMIT ?2;");
+                L"WHERE files_fts MATCH ?1 ORDER BY bm25(files_fts);");
             nameStmt.BindText(1, ftsQuery);
-            nameStmt.BindInt(2, static_cast<int>(maxResults));
             while (nameStmt.Step() == SQLITE_ROW && results.size() < maxResults)
             {
                 LocalSearchResult r;
                 r.path = nameStmt.ColumnText(0);
                 r.name = nameStmt.ColumnText(1);
                 r.isFolder = nameStmt.ColumnInt(2) != 0;
+                if (settings.IsExcluded(r.path, r.isFolder)) continue;
                 r.size = static_cast<uint64_t>(nameStmt.ColumnInt64(3));
                 r.dateCreated = nameStmt.ColumnInt64(4);
                 r.dateModified = nameStmt.ColumnInt64(5);
@@ -352,9 +459,8 @@ namespace applocal
                 Stmt contentStmt(m_read,
                     L"SELECT f.path, f.name, f.is_folder, f.size, f.date_created, f.date_modified "
                     L"FROM content_fts c JOIN files f ON f.path = c.path "
-                    L"WHERE content_fts MATCH ?1 GROUP BY f.path LIMIT ?2;");
+                    L"WHERE content_fts MATCH ?1 GROUP BY f.path;");
                 contentStmt.BindText(1, ftsQuery);
-                contentStmt.BindInt(2, static_cast<int>(maxResults));
                 while (contentStmt.Step() == SQLITE_ROW && results.size() < maxResults)
                 {
                     LocalSearchResult r;
@@ -365,6 +471,7 @@ namespace applocal
                     }
                     r.name = contentStmt.ColumnText(1);
                     r.isFolder = contentStmt.ColumnInt(2) != 0;
+                    if (settings.IsExcluded(r.path, r.isFolder)) continue;
                     r.size = static_cast<uint64_t>(contentStmt.ColumnInt64(3));
                     r.dateCreated = contentStmt.ColumnInt64(4);
                     r.dateModified = contentStmt.ColumnInt64(5);
@@ -374,12 +481,6 @@ namespace applocal
                 }
             }
         }
-        catch (const std::exception&)
-        {
-            // Local index unavailable/corrupt: degrade gracefully to
-            // indexer-only results rather than surfacing an error to the UI.
-        }
-
         return results;
     }
 
@@ -488,9 +589,15 @@ namespace applocal
 
     int64_t LocalIndex::BeginScanGeneration(const std::wstring& root)
     {
+        std::lock_guard lock(m_writeMutex);
         FILETIME ft;
         GetSystemTimeAsFileTime(&ft);
-        int64_t generation = (static_cast<int64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+        int64_t now = (static_cast<int64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+        Stmt sequence(m_write, L"UPDATE scan_sequence SET generation=MAX(generation+1,?1) WHERE id=1 RETURNING generation;");
+        sequence.BindInt64(1, now);
+        if (sequence.Step() != SQLITE_ROW) throw std::runtime_error("Missing scan generation sequence");
+        int64_t generation = sequence.ColumnInt64(0);
+        sequence.Step();
 
         SetScanRootStatus(root, L"in_progress", 0, 0);
         return generation;
@@ -499,9 +606,17 @@ namespace applocal
     void LocalIndex::SweepStale(const std::wstring& root, int64_t scanGeneration)
     {
         std::lock_guard<std::recursive_mutex> lock(m_writeMutex);
-        Stmt stmt(m_write, L"DELETE FROM files WHERE (path = ?1 OR path LIKE ?2) AND last_seen_scan < ?3;");
+        Stmt stmt(m_write, L"DELETE FROM files WHERE (path = ?1 OR path LIKE ?2 ESCAPE '\\') AND last_seen_scan < ?3;");
         stmt.BindText(1, root);
-        stmt.BindText(2, root + L"%");
+        std::wstring prefix = root;
+        if (prefix.back() != L'\\') prefix += L'\\';
+        std::wstring pattern;
+        for (auto c : prefix)
+        {
+            if (c == L'%' || c == L'_' || c == L'\\') pattern += L'\\';
+            pattern += c;
+        }
+        stmt.BindText(2, pattern + L"%");
         stmt.BindInt64(3, scanGeneration);
         stmt.Step();
     }

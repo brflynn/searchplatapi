@@ -71,6 +71,23 @@ function Find-Name($Window, [string]$Name)
         $condition)
 }
 
+function Invoke-Control($Control)
+{
+    Assert-True ($null -ne $Control) "Required UI control was not found."
+    $Control.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+}
+
+function Wait-Ui([scriptblock]$Condition, [string]$Message)
+{
+    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    do
+    {
+        if (& $Condition) { return }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw $Message
+}
+
 $ctrlShiftF = 0x0002 -bor 0x0004 -bor 0x4000
 $fKey = 0x46
 $probeHotkeyId = 99
@@ -83,13 +100,21 @@ if ($hotkeyAvailable)
 Assert-True $hotkeyAvailable "Ctrl+Shift+F was already registered before SearchApp started."
 
 $process = $null
+$fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("SearchAppUiSmoke_" + [Guid]::NewGuid().ToString("N"))
+$fixtureToken = "SearchAppSmoke" + [Guid]::NewGuid().ToString("N")
+$fixtureName = $fixtureToken + ".txt"
+$previousSmokeRoot = $env:SEARCHAPP_UI_SMOKE_ROOT
 try
 {
+    New-Item -ItemType Directory -Path $fixtureRoot | Out-Null
+    Set-Content -LiteralPath (Join-Path $fixtureRoot $fixtureName) -Value "Smoke content retained during exclusions."
+    $env:SEARCHAPP_UI_SMOKE_ROOT = $fixtureRoot
     $resolvedAppPath = (Resolve-Path $AppPath).Path
     $process = Start-Process `
         -FilePath $resolvedAppPath `
         -WorkingDirectory (Split-Path $resolvedAppPath) `
         -PassThru
+    $env:SEARCHAPP_UI_SMOKE_ROOT = $previousSmokeRoot
 
     $deadline = [DateTime]::UtcNow.AddSeconds(20)
     do
@@ -155,6 +180,14 @@ try
     Assert-True (
         $null -eq $backgroundPanelText -or $backgroundPanelText.Current.IsOffscreen
     ) "Side status panels should collapse in a narrow window."
+    $compactReindex = Find-AutomationId $window "CompactReindexButton"
+    Assert-True ($null -ne $compactReindex -and -not $compactReindex.Current.IsOffscreen) "Reindex must remain available in narrow layout."
+    Assert-True (-not (Find-AutomationId $window "CompactIndexStatusText").Current.IsOffscreen) "Reindex status must remain visible in narrow layout."
+    Invoke-Control (Find-AutomationId $window "IndexSettingsButton")
+    Wait-Ui { $null -ne (Find-AutomationId $window "IndexSettingsDialog") } "Settings did not open in narrow layout."
+    $dialog = Find-AutomationId $window "IndexSettingsDialog"
+    Wait-Ui { $null -ne (Find-Name $dialog "No exclusions.") } "Empty exclusion state was not shown."
+    Invoke-Control (Find-Name $dialog "Close")
 
     [SearchAppUiNative]::SetWindowPos(
         $windowHandle, [IntPtr]::Zero, 40, 40, 1500, 900, 0x0040) | Out-Null
@@ -163,6 +196,35 @@ try
     Assert-True (
         $null -ne $backgroundPanelText -and -not $backgroundPanelText.Current.IsOffscreen
     ) "Side status panels should be visible in a wide window."
+
+    Invoke-Control (Find-AutomationId $window "ReindexButton")
+    $valuePattern.SetValue($fixtureToken)
+    Wait-Ui { $null -ne (Find-Name $window $fixtureName) } "Fixture did not appear after local reindex."
+    Invoke-Control (Find-Name $window "Result actions")
+    Wait-Ui { $null -ne (Find-Name $window "Request Windows Search content indexing for folder") } "Result actions menu did not open."
+    $scopeAction = Find-Name $window "Request Windows Search content indexing for folder"
+    Assert-True ($null -ne $scopeAction -and -not $scopeAction.Current.IsEnabled) "Smoke mode must disable real Windows Search scope changes."
+    Invoke-Control (Find-Name $window "Exclude extension: .txt")
+    Wait-Ui { $statusText.Current.Name -match "^0 results" } "Extension exclusion did not immediately refresh results."
+    Assert-True ($null -eq (Find-Name $window $fixtureName)) "Excluded extension remained visible."
+    Invoke-Control (Find-AutomationId $window "IndexSettingsButton")
+    Wait-Ui { $null -ne (Find-Name $window "Restore .txt") } "Persisted extension exclusion was not listed."
+    Invoke-Control (Find-Name $window "Restore .txt")
+    Wait-Ui { $null -ne (Find-Name $window "No exclusions.") } "Extension restore did not update settings."
+    Invoke-Control (Find-Name (Find-AutomationId $window "IndexSettingsDialog") "Close")
+    Wait-Ui { $null -ne (Find-Name $window $fixtureName) } "Restoring extension did not bring retained data back."
+
+    Invoke-Control (Find-Name $window "Result actions")
+    Wait-Ui { $null -ne (Find-Name $window ("Exclude folder: " + $fixtureRoot.ToLowerInvariant())) } "Folder action menu did not open."
+    Invoke-Control (Find-Name $window ("Exclude folder: " + $fixtureRoot.ToLowerInvariant()))
+    Wait-Ui { $statusText.Current.Name -match "^0 results" } "Folder exclusion did not refresh results."
+    Invoke-Control (Find-AutomationId $window "IndexSettingsButton")
+    $restoreFolderName = "Restore " + $fixtureRoot.ToLowerInvariant()
+    Wait-Ui { $null -ne (Find-Name $window $restoreFolderName) } "Folder exclusion was not listed."
+    Invoke-Control (Find-Name $window $restoreFolderName)
+    Wait-Ui { $null -ne (Find-Name $window "No exclusions.") } "Folder restore did not update settings."
+    Invoke-Control (Find-Name (Find-AutomationId $window "IndexSettingsDialog") "Close")
+    Wait-Ui { $null -ne (Find-Name $window $fixtureName) } "Restoring folder did not bring retained data back."
 
     $messageOnly = [IntPtr](-3)
     $hotkeyWindow = [SearchAppUiNative]::FindWindowEx(
@@ -176,14 +238,34 @@ try
         [System.Windows.Automation.ValuePattern]::Pattern)
     Assert-True ($valuePattern.Current.Value -eq "") "Ctrl+Shift+F did not clear and focus search."
 
-    Write-Host "PASS: Search input, responsiveness, resize behavior, and Ctrl+Shift+F."
+    Write-Host "PASS: Search, responsiveness, resize, reindex, settings, folder/extension exclusion and restore, safe scope controls, Ctrl+Shift+F."
     Write-Host "Maximum measured UI message latency: $maxLatency ms"
+}
+catch
+{
+    Write-Host "FAIL: $($_.Exception.Message)"
+    throw
 }
 finally
 {
+    $env:SEARCHAPP_UI_SMOKE_ROOT = $previousSmokeRoot
     if ($process -and -not $process.HasExited)
     {
         Stop-Process -Id $process.Id
         Wait-Process -Id $process.Id -ErrorAction SilentlyContinue
     }
+    foreach ($file in @($fixtureName, "ui-smoke.db", "ui-smoke.db-wal", "ui-smoke.db-shm"))
+    {
+        $fixtureFile = Join-Path $fixtureRoot $file
+        for ($attempt = 0; $attempt -lt 30 -and (Test-Path -LiteralPath $fixtureFile); $attempt++)
+        {
+            try { Remove-Item -LiteralPath $fixtureFile }
+            catch
+            {
+                if ($attempt -eq 29) { throw }
+                Start-Sleep -Milliseconds 100
+            }
+        }
+    }
+    if (Test-Path -LiteralPath $fixtureRoot) { Remove-Item -LiteralPath $fixtureRoot }
 }

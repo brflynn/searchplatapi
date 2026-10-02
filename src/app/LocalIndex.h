@@ -14,6 +14,7 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include "IndexSettings.h"
 
 struct sqlite3;
 
@@ -78,6 +79,14 @@ namespace applocal
         // capped so a single very-common word can't crowd out filename
         // matches.
         std::vector<LocalSearchResult> Search(const std::wstring& queryText, uint32_t maxResults) const;
+        std::vector<LocalSearchResult> Search(const std::wstring& queryText, uint32_t maxResults,
+            const IndexSettings& settings) const;
+        IndexSettings GetSettings() const;
+        void AddExclusion(const std::wstring& kind, const std::wstring& value);
+        void RemoveExclusion(const std::wstring& kind, const std::wstring& value);
+        void SetContentScope(const ContentScope& scope);
+        void ForgetContentScope(const std::wstring& folder);
+        void RecoverInterruptedScopeRequests();
 
         // --- Writer-side API used by BackgroundIndexer ---
 
@@ -106,8 +115,8 @@ namespace applocal
 
         void DeleteContent(const std::wstring& path);
 
-        // A scan generation is just "now" as a FILETIME int64: monotonic
-        // across app runs without needing a persisted counter. Every file
+        // Scan generations use a persisted monotonic sequence seeded by
+        // FILETIME (also safe for rapid requests or clock rollback). Every file
         // touched during a walk of `root` is stamped with this value;
         // SweepStale() then deletes anything under `root` that has an
         // older stamp (i.e. wasn't seen this walk - handles deletes/renames).
@@ -134,6 +143,9 @@ namespace applocal
         sqlite3* m_read = nullptr;         // interactive search
         sqlite3* m_contentRead = nullptr;  // background content freshness checks
         sqlite3* m_statsRead = nullptr;    // dashboard/root status
+        sqlite3* m_settings = nullptr;     // settings never share the scanner's transaction
+        mutable std::mutex m_settingsMutex;
+        mutable std::mutex m_searchMutex;
         mutable std::recursive_mutex m_writeMutex;
     };
 }

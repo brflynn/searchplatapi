@@ -162,6 +162,8 @@
     <ClInclude Include="thirdparty\sqlite\sqlite3.h" />
     <ClInclude Include="LocalIndex.h" />
     <ClInclude Include="BackgroundIndexer.h" />
+    <ClInclude Include="IndexSettings.h" />
+    <ClInclude Include="ContentScopeRequest.h" />
   </ItemGroup>
 
   <!-- XAML markup files -->

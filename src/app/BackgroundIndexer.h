@@ -31,10 +31,13 @@ namespace applocal
         Stopped,
         Running,
         Paused,
+        Error,
     };
 
     struct IndexerOptions
     {
+        // Empty selects all fixed NTFS volumes. Explicit roots support isolated tests.
+        std::vector<std::wstring> scanRoots;
         // Skip FILE_ATTRIBUTE_REPARSE_POINT directories by default to avoid
         // cycles (junctions/symlinks can point back into already-scanned
         // trees). Configurable per the requirements.
@@ -65,12 +68,14 @@ namespace applocal
         uint64_t filesScanned = 0;
         std::wstring currentPath;
         std::chrono::milliseconds elapsed{ 0 };
+        std::wstring reindexStatus = L"Ready";
+        std::wstring error;
     };
 
     // Owns two background-priority worker threads (scanner + content
     // indexer) that populate a shared LocalIndex. Safe to construct/destruct
-    // from the UI thread; Start()/Stop()/Pause()/Resume()/GetProgress() are
-    // all safe to call from the UI thread while the workers run.
+    // from the UI thread; requests/progress never join workers. Stop() and
+    // destruction join, so the window transfers ownership to a background task on close.
     class BackgroundIndexer
     {
     public:
@@ -97,9 +102,9 @@ namespace applocal
         void Pause();
         void Resume();
 
-        // Resets a previously-completed root back to "pending" so the next
-        // Start() walks it again (e.g. a user-initiated "Rescan now").
+        // Queues a root on the existing persistent scanner, even while scanning.
         void RescanRoot(const std::wstring& root);
+        void RequestReindex(); // coalesced full-volume rescan, no DB writes or joins here
 
         IndexerProgress GetProgress() const;
 
@@ -129,7 +134,7 @@ namespace applocal
 
         std::atomic<bool> m_stopRequested{ false };
         std::atomic<bool> m_paused{ false };
-        std::atomic<bool> m_scanComplete{ false };
+        std::atomic<bool> m_scannerActive{ false };
         std::condition_variable m_pauseCv;
         std::mutex m_pauseMutex;
 
@@ -140,5 +145,9 @@ namespace applocal
         std::mutex m_queueMutex;
         std::condition_variable m_queueCv;
         std::deque<std::wstring> m_contentQueue;
+        std::mutex m_workMutex;
+        std::condition_variable m_workCv;
+        bool m_rescanAll = false;
+        std::vector<std::wstring> m_requestedRoots;
     };
 }
