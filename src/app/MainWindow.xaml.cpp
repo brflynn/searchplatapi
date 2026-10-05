@@ -193,34 +193,6 @@ namespace winrt::SearchApp::implementation
             StatusText().Text(L"Failed to initialize Windows Search indexer session.");
         }
 
-        // Initialize the "true index" full-filesystem background indexer.
-        // This is additive/best-effort: if the on-disk index can't be
-        // opened (e.g. no write access to %LOCALAPPDATA%), search silently
-        // falls back to indexer-only results exactly as before this feature.
-        try
-        {
-            std::wstring dbPath = applocal::LocalIndex::DefaultDbPath();
-            applocal::IndexerOptions options;
-            wchar_t testRoot[32768]{};
-            DWORD testRootLength = GetEnvironmentVariableW(L"SEARCHAPP_UI_SMOKE_ROOT", testRoot, ARRAYSIZE(testRoot));
-            if (testRootLength && testRootLength < ARRAYSIZE(testRoot))
-            {
-                auto root = applocal::NormalizeFolder(testRoot);
-                options.scanRoots = { root };
-                dbPath = root + L"\\ui-smoke.db";
-                m_uiSmokeTest = true;
-            }
-            m_localIndex = std::make_shared<applocal::LocalIndex>(dbPath);
-            m_localIndex->RecoverInterruptedScopeRequests();
-            m_backgroundIndexer = std::make_unique<applocal::BackgroundIndexer>(m_localIndex, options);
-            m_backgroundIndexer->Start();
-        }
-        catch (...)
-        {
-            m_localIndex.reset();
-            m_backgroundIndexer.reset();
-            StatusText().Text(L"Local index/settings unavailable. Exclusion controls are disabled.");
-        }
         Closed([this](auto&&, auto&&)
         {
             m_closed->store(true);
@@ -259,8 +231,7 @@ namespace winrt::SearchApp::implementation
         });
         m_indexStatusTimer.Start();
         UpdateIndexerProgress();
-        UpdateIndexStatisticsAsync();
-        ReloadSettingsAsync();
+        InitializeLocalIndexAsync();
 
         // Auto-focus the search box
         SearchTextBox().Loaded([this](auto&&, auto&&)
@@ -289,15 +260,84 @@ namespace winrt::SearchApp::implementation
         }
     }
 
+    IAsyncAction MainWindow::InitializeLocalIndexAsync()
+    {
+        auto lifetime = get_strong();
+        apartment_context ui;
+        auto cancelled = m_closed;
+        std::shared_ptr<applocal::LocalIndex> index;
+        std::unique_ptr<applocal::BackgroundIndexer> indexer;
+        bool smokeTest = false;
+        std::wstring error;
+        StatusText().Text(L"Opening local index and visibility settings...");
+        co_await resume_background();
+        try
+        {
+            std::wstring dbPath = applocal::LocalIndex::DefaultDbPath();
+            applocal::IndexerOptions options;
+            wchar_t testRoot[32768]{};
+            DWORD length = GetEnvironmentVariableW(L"SEARCHAPP_UI_SMOKE_ROOT", testRoot, ARRAYSIZE(testRoot));
+            if (length && length < ARRAYSIZE(testRoot))
+            {
+                auto root = applocal::NormalizeFolder(testRoot);
+                options.scanRoots = { root };
+                dbPath = root + L"\\ui-smoke.db";
+                smokeTest = true;
+            }
+            index = std::make_shared<applocal::LocalIndex>(dbPath, cancelled.get());
+            index->RecoverInterruptedScopeRequests();
+            indexer = std::make_unique<applocal::BackgroundIndexer>(index, options);
+            if (!cancelled->load()) indexer->Start();
+        }
+        catch (const std::exception& e)
+        {
+            error = L"Local index/settings unavailable: " + to_hstring(e.what());
+        }
+        co_await ui;
+        if (cancelled->load())
+        {
+            if (indexer) StopIndexerAsync(std::move(indexer));
+            co_return;
+        }
+        m_uiSmokeTest = smokeTest;
+        if (error.empty())
+        {
+            m_localIndex = std::move(index);
+            m_backgroundIndexer = std::move(indexer);
+        }
+        else
+        {
+            if (indexer) StopIndexerAsync(std::move(indexer));
+            m_settingsError = error;
+        }
+        m_localInitializationComplete.store(true);
+        UpdateIndexerProgress();
+        if (error.empty())
+        {
+            co_await ReloadSettingsAsync();
+            if (cancelled->load()) co_return;
+            UpdateIndexStatisticsAsync();
+            RefreshSearch();
+        }
+        else
+        {
+            PopulateSettings();
+            StatusText().Text(error);
+        }
+    }
+
     void MainWindow::UpdateIndexerProgress()
     {
         if (!m_backgroundIndexer)
         {
             ReindexButton().IsEnabled(false);
             CompactReindexButton().IsEnabled(false);
-            IndexerStateText().Text(L"Unavailable");
-            CompactIndexStatusText().Text(L"Local reindex unavailable: local database could not be opened.");
-            CurrentIndexPathText().Text(L"The local index could not be opened.");
+            const bool loading = !m_localInitializationComplete.load();
+            IndexerStateText().Text(loading ? L"Opening index..." : L"Unavailable");
+            CompactIndexStatusText().Text(loading ? L"Opening local index and settings..." :
+                L"Local reindex unavailable: local database could not be opened.");
+            CurrentIndexPathText().Text(loading ? L"Database initialization runs in the background." :
+                L"The local index could not be opened.");
             return;
         }
 
@@ -446,6 +486,11 @@ namespace winrt::SearchApp::implementation
         {
             SearchResults().ItemsSource(nullptr);
             StatusText().Text(L"");
+            return;
+        }
+        if (!m_localInitializationComplete.load())
+        {
+            StatusText().Text(L"Opening local index and visibility settings...");
             return;
         }
 
@@ -612,7 +657,7 @@ namespace winrt::SearchApp::implementation
         if (!m_operationError.empty()) text(m_operationError);
         if (!m_settingsReady)
         {
-            text(!m_settingsError.empty() ? m_settingsError : m_localIndex ?
+            text(!m_settingsError.empty() ? m_settingsError : !m_localInitializationComplete.load() || m_localIndex ?
                 L"Loading settings..." : L"Settings unavailable: local database could not be opened.");
             return;
         }
@@ -794,7 +839,8 @@ namespace winrt::SearchApp::implementation
 
         co_await winrt::resume_background();
 
-        if (m_queryGeneration != generation || m_closed->load() || m_visibilityChanging.load())
+        if (!m_localInitializationComplete.load() ||
+            m_queryGeneration != generation || m_closed->load() || m_visibilityChanging.load())
             co_return;
 
         bool searchFailed = false;

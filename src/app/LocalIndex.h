@@ -10,6 +10,7 @@
 #pragma once
 
 #include <cstdint>
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -64,7 +65,7 @@ namespace applocal
     class LocalIndex
     {
     public:
-        explicit LocalIndex(std::wstring dbPath);
+        explicit LocalIndex(std::wstring dbPath, const std::atomic<bool>* initializationCancelled = nullptr);
         ~LocalIndex();
 
         LocalIndex(const LocalIndex&) = delete;

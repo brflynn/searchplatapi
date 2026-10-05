@@ -21,6 +21,7 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
@@ -31,7 +32,7 @@
                 Background="Transparent"/>
 
         <!-- Centered search box -->
-        <TextBox Grid.Row="1"
+        <TextBox Grid.Row="2"
                  Grid.ColumnSpan="3"
                  x:Name="SearchTextBox"
                  PlaceholderText="Type to search files..."
@@ -45,7 +46,7 @@
                  Margin="0,20,0,0"/>
 
         <!-- Status bar -->
-        <TextBlock Grid.Row="2"
+        <TextBlock Grid.Row="3"
                    Grid.ColumnSpan="3"
                    x:Name="StatusText"
                    HorizontalAlignment="Stretch"
@@ -53,18 +54,18 @@
                    Margin="0,10,0,0"
                    FontSize="12"
                    Foreground="#FF7E7E8E"/>
-        <StackPanel Grid.Row="0" Grid.ColumnSpan="3" Orientation="Horizontal"
-                    HorizontalAlignment="Left" Margin="12,4,160,4" Spacing="8">
+        <StackPanel Grid.Row="1" Grid.ColumnSpan="3" Orientation="Horizontal"
+                    HorizontalAlignment="Left" Margin="24,4,24,0" Spacing="8">
             <Button Content="Index settings" Click="Settings_Click" x:Name="IndexSettingsButton"/>
             <Button Content="Reindex local volumes" Click="Reindex_Click" x:Name="CompactReindexButton"/>
         </StackPanel>
-        <TextBlock Grid.Row="3" Grid.ColumnSpan="3" x:Name="CompactIndexStatusText"
+        <TextBlock Grid.Row="4" Grid.ColumnSpan="3" x:Name="CompactIndexStatusText"
                    Visibility="Collapsed" Margin="24,8,24,0" MaxWidth="680"
                    Foreground="#FF80BFFF" FontSize="11" TextWrapping="Wrap"
                    MaxLines="3" TextTrimming="CharacterEllipsis"/>
 
         <!-- Live background-index status -->
-        <Border Grid.Row="4"
+        <Border Grid.Row="5"
                 Grid.Column="0"
                 x:Name="LeftStatusPanel"
                 HorizontalAlignment="Right"
@@ -130,7 +131,7 @@
         </Border>
 
         <!-- Search results -->
-        <ListView Grid.Row="4"
+        <ListView Grid.Row="5"
                   Grid.Column="1"
                   x:Name="SearchResults"
                   DoubleTapped="SearchResults_DoubleTapped"
@@ -195,7 +196,7 @@
         </ListView>
 
         <!-- Persisted index totals -->
-        <Border Grid.Row="4"
+        <Border Grid.Row="5"
                 Grid.Column="2"
                 x:Name="RightStatusPanel"
                 HorizontalAlignment="Left"

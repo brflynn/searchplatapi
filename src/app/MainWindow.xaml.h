@@ -44,6 +44,7 @@ namespace winrt::SearchApp::implementation
         static constexpr int GlobalSearchHotkeyId = 1;
 
         void OpenSelectedResult();
+        Windows::Foundation::IAsyncAction InitializeLocalIndexAsync();
         void RefreshSearch();
         Windows::Foundation::IAsyncAction ReloadSettingsAsync();
         Windows::Foundation::IAsyncAction ChangeSettingAsync(std::wstring operation, std::wstring kind, std::wstring value);
@@ -79,6 +80,7 @@ namespace winrt::SearchApp::implementation
         // be null if the on-disk index couldn't be opened, in which case
         // search falls back to Windows Search with an explicit settings error.
         std::shared_ptr<applocal::LocalIndex> m_localIndex;
+        std::atomic<bool> m_localInitializationComplete{ false };
         std::unique_ptr<applocal::BackgroundIndexer> m_backgroundIndexer;
         Microsoft::UI::Dispatching::DispatcherQueueTimer m_searchDebounceTimer{ nullptr };
         Microsoft::UI::Dispatching::DispatcherQueueTimer m_indexStatusTimer{ nullptr };

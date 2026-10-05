@@ -2,6 +2,7 @@
 #include "pch.h"
 #include "../app/LocalIndex.h"
 #include "../app/ContentScopeRequest.h"
+#include "../app/thirdparty/sqlite/sqlite3.h"
 
 #include <windows.h>
 #include <atomic>
@@ -301,6 +302,51 @@ namespace LocalIndexTests
     TEST_CLASS(ScanGenerationSweepTests)
     {
     public:
+        TEST_METHOD(TestLegacyGenerationSeedAndReopenPreserveSequence)
+        {
+            auto db = MakeTempDbPath();
+            constexpr int64_t future = 800000000000000000;
+            {
+                LocalIndex index(db);
+                index.UpsertFile(L"C:\\legacy.txt", L"legacy.txt", L"C:\\", false, 1, 0, 1, 1, 1, future);
+            }
+            sqlite3* connection = nullptr;
+            Assert::AreEqual(SQLITE_OK, sqlite3_open16(db.c_str(), &connection));
+            Assert::AreEqual(SQLITE_OK, sqlite3_exec(connection, "DROP TABLE scan_sequence;", nullptr, nullptr, nullptr));
+            Assert::AreEqual(SQLITE_OK, sqlite3_close(connection));
+            {
+                LocalIndex migrated(db);
+                Assert::AreEqual(future + 1, migrated.BeginScanGeneration(L"C:\\"));
+                migrated.UpsertFile(L"C:\\later.txt", L"later.txt", L"C:\\", false, 1, 0, 1, 1, 1, future + 100);
+            }
+            {
+                LocalIndex reopened(db);
+                // An existing sequence is never reseeded by scanning the entire files table.
+                Assert::AreEqual(future + 2, reopened.BeginScanGeneration(L"C:\\"));
+                Assert::IsFalse(reopened.Search(L"legacy", 1).empty());
+            }
+            DeleteFileW(db.c_str());
+        }
+
+        TEST_METHOD(TestCancelledInitializationCanBeReopenedWithoutLosingData)
+        {
+            auto db = MakeTempDbPath();
+            {
+                LocalIndex index(db);
+                index.UpsertFile(L"C:\\retained.txt", L"retained.txt", L"C:\\", false, 1, 0, 1, 1, 1, 1);
+                index.AddExclusion(L"extension", L".txt");
+            }
+            std::atomic<bool> cancelled{ true };
+            Assert::ExpectException<std::runtime_error>([&] { LocalIndex index(db, &cancelled); });
+            {
+                LocalIndex reopened(db);
+                Assert::AreEqual(size_t(1), reopened.GetSettings().exclusions.size());
+                reopened.RemoveExclusion(L"extension", L".txt");
+                Assert::IsFalse(reopened.Search(L"retained", 1).empty());
+            }
+            DeleteFileW(db.c_str());
+        }
+
         TEST_METHOD(TestSweepHonorsFolderBoundaryAndSqlWildcardNames)
         {
             auto db = MakeTempDbPath();

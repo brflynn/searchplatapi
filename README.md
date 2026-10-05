@@ -130,10 +130,17 @@ Filtered hits do not consume the displayed result cap. Changing a rule
 invalidates in-flight queries and refreshes the current search.
 
 **Index settings**, available in both layouts, lists exclusions with **Restore**
-buttons. Restoring a rule brings retained results back without reindexing.
+buttons. Its toolbar sits below the custom title-bar drag region so settings
+and compact reindex controls receive mouse clicks normally.
+Restoring a rule brings retained results back without reindexing.
 Settings use additive `exclusions` and `content_scopes` tables in the same
 `%LOCALAPPDATA%\SearchApp\index.db`, with an independent SQLite connection so
 settings operations do not hold the scanner's transaction lock.
+Opening and migrating the local database runs in the background, so large
+existing indexes cannot freeze the launch UI. Search waits for visibility
+settings to load before displaying results. The scan-generation sequence is
+seeded from existing rows only once; later launches read its single persisted
+record without rescanning the entire file table.
 
 **Request Windows Search content indexing for folder** is a separate, explicit
 per-result action. It uses `ISearchCrawlScopeManager::AddUserScopeRule` to

@@ -148,7 +148,7 @@ namespace applocal
         }
     }
 
-    LocalIndex::LocalIndex(std::wstring dbPath)
+    LocalIndex::LocalIndex(std::wstring dbPath, const std::atomic<bool>* initializationCancelled)
     {
         auto cleanup = wil::scope_exit([this]
         {
@@ -171,6 +171,15 @@ namespace applocal
             throw std::runtime_error("failed to open LocalIndex write connection");
         }
         sqlite3_busy_timeout(m_write, 5000);
+        if (initializationCancelled)
+        {
+            if (initializationCancelled->load())
+                throw std::runtime_error("Local index initialization cancelled");
+            sqlite3_progress_handler(m_write, 1000, [](void* context)
+            {
+                return static_cast<const std::atomic<bool>*>(context)->load() ? 1 : 0;
+            }, const_cast<std::atomic<bool>*>(initializationCancelled));
+        }
 
         // Run schema migrations (including enabling WAL) on the write
         // connection *before* opening the read connection below, so the
@@ -179,6 +188,7 @@ namespace applocal
         // unable to see the -wal file's committed-but-not-checkpointed
         // rows (visible as "just-written data isn't found by Search()").
         RunMigrations();
+        sqlite3_progress_handler(m_write, 0, nullptr, nullptr);
 
         // Read connection: read-only so it isn't blocked for long behind
         // the writer's bulk transactions. WAL mode (enabled above) lets
@@ -318,10 +328,16 @@ namespace applocal
             "CREATE TABLE IF NOT EXISTS content_scopes ("
             "folder TEXT PRIMARY KEY, state TEXT NOT NULL, detail TEXT NOT NULL);");
         ExecOrThrow(m_write,
-            "CREATE TABLE IF NOT EXISTS scan_sequence (id INTEGER PRIMARY KEY CHECK(id=1), generation INTEGER NOT NULL);"
-            "INSERT OR IGNORE INTO scan_sequence(id,generation) "
-            "SELECT 1,COALESCE(MAX(last_seen_scan),0) FROM files "
-            "WHERE NOT EXISTS(SELECT 1 FROM scan_sequence WHERE id=1);");
+            "CREATE TABLE IF NOT EXISTS scan_sequence (id INTEGER PRIMARY KEY CHECK(id=1), generation INTEGER NOT NULL);");
+        Stmt sequence(m_write, L"SELECT generation FROM scan_sequence WHERE id=1;");
+        if (sequence.Step() == SQLITE_DONE)
+        {
+            // Aggregate queries still scan files when their WHERE condition excludes all rows.
+            // Only seed an absent sequence; subsequent opens must not touch the full file table.
+            ExecOrThrow(m_write,
+                "INSERT OR IGNORE INTO scan_sequence(id,generation) "
+                "SELECT 1,COALESCE(MAX(last_seen_scan),0) FROM files;");
+        }
     }
 
     std::vector<LocalSearchResult> LocalIndex::Search(const std::wstring& queryText, uint32_t maxResults) const
