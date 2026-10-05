@@ -1,6 +1,8 @@
 // Copyright (C) Microsoft Corporation. All rights reserved.
 #include "pch.h"
 #include "../app/LocalIndex.h"
+#include "../app/ContentScopeRequest.h"
+#include "../app/thirdparty/sqlite/sqlite3.h"
 
 #include <windows.h>
 #include <atomic>
@@ -48,6 +50,133 @@ namespace LocalIndexTests
             return false;
         }
     }
+
+    TEST_CLASS(IndexSettingsTests)
+    {
+    public:
+        TEST_METHOD(TestNormalizedFolderBoundariesAndResultActions)
+        {
+            IndexSettings settings;
+            settings.exclusions.push_back({ L"folder", NormalizeFolder(L"C:/Foo/./Bar/../") });
+            Assert::IsTrue(settings.IsExcluded(L"c:\\FOO\\report.TXT", false));
+            Assert::IsTrue(settings.IsExcluded(L"C:\\Foo", true));
+            Assert::IsFalse(settings.IsExcluded(L"C:\\Foobar\\report.txt", false));
+            Assert::AreEqual(std::wstring(L"c:\\foo"), ResultFolder(L"C:\\Foo\\report.txt", false));
+            Assert::AreEqual(std::wstring(L"c:\\foo"), ResultFolder(L"C:\\Foo", true));
+            Assert::AreEqual(std::wstring(L"c:\\"), ResultFolder(L"C:\\file.txt", false));
+            Assert::AreEqual(NormalizeFolder(L"\\\\server\\share\\foo"),
+                NormalizeFolder(L"\\\\?\\UNC\\SERVER\\share\\foo\\"));
+            Assert::AreEqual(NormalizeFolder(L"C:\\Foo"), NormalizeFolder(L"\\\\?\\C:\\FOO\\"));
+        }
+
+        TEST_METHOD(TestExtensionRulesAndNoExtensionActions)
+        {
+            IndexSettings settings;
+            settings.exclusions.push_back({ L"extension", L".txt" });
+            Assert::IsTrue(settings.IsExcluded(L"C:\\notes\\REPORT.TXT", false));
+            Assert::IsFalse(settings.IsExcluded(L"C:\\notes\\folder.txt", true));
+            Assert::IsFalse(settings.IsExcluded(L"C:\\notes.txt\\README", false));
+            Assert::IsTrue(ResultExtension(L"C:\\README", false).empty());
+            Assert::IsTrue(ResultExtension(L"C:\\file.", false).empty());
+            Assert::IsTrue(ResultExtension(L"C:\\.gitignore", false).empty());
+        }
+
+        TEST_METHOD(TestSettingsRoundTripDuplicatesAndUndoRetainContent)
+        {
+            auto db = MakeTempDbPath();
+            {
+                LocalIndex index(db);
+                index.UpsertFile(L"C:\\foo\\report.TXT", L"report.TXT", L"C:\\foo", false, 1, 0, 1, 1, 1, 1);
+                index.UpsertContent(L"C:\\foo\\report.TXT", { L"retainedcontent" }, 1, 1, false);
+                index.AddExclusion(L"folder", L"C:/FOO/");
+                index.AddExclusion(L"folder", L"c:\\foo");
+                index.AddExclusion(L"extension", L".TXT");
+                index.SetContentScope({ L"C:\\Foo", L"failed", L"Permission denied" });
+                Assert::AreEqual(size_t(2), index.GetSettings().exclusions.size());
+            }
+            {
+                LocalIndex reopened(db);
+                auto settings = reopened.GetSettings();
+                Assert::AreEqual(size_t(2), settings.exclusions.size());
+                Assert::AreEqual(std::wstring(L"c:\\foo"), settings.contentScopes.at(0).folder);
+                Assert::AreEqual(std::wstring(L"failed"), settings.contentScopes.at(0).state);
+                Assert::IsTrue(reopened.Search(L"report", 1).empty());
+                Assert::IsTrue(reopened.Search(L"retainedcontent", 1).empty());
+                Assert::AreEqual(uint64_t(1), reopened.GetStatistics().contentIndexedFiles);
+                reopened.RemoveExclusion(L"folder", L"C:\\FOO\\");
+                reopened.RemoveExclusion(L"extension", L".TXT");
+                Assert::AreEqual(size_t(1), reopened.Search(L"retainedcontent", 1).size());
+                reopened.ForgetContentScope(L"C:\\FOO");
+                Assert::IsTrue(reopened.GetSettings().contentScopes.empty());
+            }
+            DeleteFileW(db.c_str());
+        }
+
+        TEST_METHOD(TestBothSourcesUseSameFilterBeforeNameAndContentCaps)
+        {
+            auto db = MakeTempDbPath();
+            {
+                LocalIndex index(db);
+                for (int i = 0; i < 70; ++i)
+                {
+                    auto name = L"common" + std::to_wstring(i) + L".txt";
+                    auto path = L"C:\\hidden\\" + name;
+                    index.UpsertFile(path, name, L"C:\\hidden", false, 1, 0, 1, 1, 1, 1);
+                    index.UpsertContent(path, { L"sharedcontent" }, 1, 1, false);
+                }
+                index.UpsertFile(L"C:\\allowed\\commonallowed.md", L"commonallowed.md", L"C:\\allowed", false, 1, 0, 1, 1, 1, 1);
+                index.UpsertContent(L"C:\\allowed\\commonallowed.md", { L"sharedcontent" }, 1, 1, false);
+                index.AddExclusion(L"folder", L"C:\\hidden");
+                auto settings = index.GetSettings();
+                // The Windows Search merge uses this same source-independent predicate.
+                Assert::IsTrue(settings.IsExcluded(L"C:\\HIDDEN\\common0.txt", false));
+                Assert::IsFalse(settings.IsExcluded(L"C:\\allowed\\commonallowed.md", false));
+                Assert::AreEqual(std::wstring(L"C:\\allowed\\commonallowed.md"), index.Search(L"common", 1, settings).at(0).path);
+                Assert::AreEqual(std::wstring(L"C:\\allowed\\commonallowed.md"), index.Search(L"sharedcontent", 1, settings).at(0).path);
+            }
+            DeleteFileW(db.c_str());
+        }
+
+        TEST_METHOD(TestFolderFileUrlEscapesAndUnc)
+        {
+            Assert::AreEqual(std::wstring(L"file:///c:/a%20b/%23%25%3F/"), FolderFileUrl(L"C:\\a b\\#%?"));
+            Assert::AreEqual(std::wstring(L"file://server/share/a%20b/"), FolderFileUrl(L"\\\\server\\share\\a b"));
+            Assert::AreEqual(std::wstring(L"file:///c:/caf%C3%A9/"), FolderFileUrl(L"C:\\caf\u00E9"));
+        }
+
+        TEST_METHOD(TestInvalidRulesFailExplicitly)
+        {
+            auto db = MakeTempDbPath();
+            {
+                LocalIndex index(db);
+                Assert::ExpectException<std::invalid_argument>([&] { index.AddExclusion(L"folder", L"relative"); });
+                Assert::ExpectException<std::invalid_argument>([&] { index.AddExclusion(L"extension", L"."); });
+                Assert::ExpectException<std::invalid_argument>([&] { index.AddExclusion(L"extension", L".a/b"); });
+                Assert::IsTrue(index.GetSettings().exclusions.empty());
+            }
+            DeleteFileW(db.c_str());
+        }
+
+        TEST_METHOD(TestInterruptedScopeRecoveryAndCancellationNeverChangeWindowsScope)
+        {
+            auto db = MakeTempDbPath();
+            {
+                LocalIndex index(db);
+                index.SetContentScope({ L"C:\\pending", L"pending", L"Started" });
+                index.SetContentScope({ L"C:\\done", L"idle", L"Catalog idle only" });
+                index.RecoverInterruptedScopeRequests();
+                auto scopes = index.GetSettings().contentScopes;
+                Assert::AreEqual(std::wstring(L"idle"), scopes.at(0).state);
+                Assert::AreEqual(std::wstring(L"cancelled"), scopes.at(1).state);
+                Assert::IsTrue(scopes.at(1).detail.find(L"No Windows scope rules") != std::wstring::npos);
+                std::atomic<bool> cancelled{ true };
+                auto result = RunContentScopeRequest(L"C:\\pending", cancelled);
+                Assert::AreEqual(std::wstring(L"cancelled"), result.state);
+                Assert::IsTrue(result.detail.find(L"before changing") != std::wstring::npos);
+            }
+            DeleteFileW(db.c_str());
+        }
+    };
 
     TEST_CLASS(FilenameSearchTests)
     {
@@ -173,6 +302,67 @@ namespace LocalIndexTests
     TEST_CLASS(ScanGenerationSweepTests)
     {
     public:
+        TEST_METHOD(TestLegacyGenerationSeedAndReopenPreserveSequence)
+        {
+            auto db = MakeTempDbPath();
+            constexpr int64_t future = 800000000000000000;
+            {
+                LocalIndex index(db);
+                index.UpsertFile(L"C:\\legacy.txt", L"legacy.txt", L"C:\\", false, 1, 0, 1, 1, 1, future);
+            }
+            sqlite3* connection = nullptr;
+            Assert::AreEqual(SQLITE_OK, sqlite3_open16(db.c_str(), &connection));
+            Assert::AreEqual(SQLITE_OK, sqlite3_exec(connection, "DROP TABLE scan_sequence;", nullptr, nullptr, nullptr));
+            Assert::AreEqual(SQLITE_OK, sqlite3_close(connection));
+            {
+                LocalIndex migrated(db);
+                Assert::AreEqual(future + 1, migrated.BeginScanGeneration(L"C:\\"));
+                migrated.UpsertFile(L"C:\\later.txt", L"later.txt", L"C:\\", false, 1, 0, 1, 1, 1, future + 100);
+            }
+            {
+                LocalIndex reopened(db);
+                // An existing sequence is never reseeded by scanning the entire files table.
+                Assert::AreEqual(future + 2, reopened.BeginScanGeneration(L"C:\\"));
+                Assert::IsFalse(reopened.Search(L"legacy", 1).empty());
+            }
+            DeleteFileW(db.c_str());
+        }
+
+        TEST_METHOD(TestCancelledInitializationCanBeReopenedWithoutLosingData)
+        {
+            auto db = MakeTempDbPath();
+            {
+                LocalIndex index(db);
+                index.UpsertFile(L"C:\\retained.txt", L"retained.txt", L"C:\\", false, 1, 0, 1, 1, 1, 1);
+                index.AddExclusion(L"extension", L".txt");
+            }
+            std::atomic<bool> cancelled{ true };
+            Assert::ExpectException<std::runtime_error>([&] { LocalIndex index(db, &cancelled); });
+            {
+                LocalIndex reopened(db);
+                Assert::AreEqual(size_t(1), reopened.GetSettings().exclusions.size());
+                reopened.RemoveExclusion(L"extension", L".txt");
+                Assert::IsFalse(reopened.Search(L"retained", 1).empty());
+            }
+            DeleteFileW(db.c_str());
+        }
+
+        TEST_METHOD(TestSweepHonorsFolderBoundaryAndSqlWildcardNames)
+        {
+            auto db = MakeTempDbPath();
+            {
+                LocalIndex index(db);
+                index.UpsertFile(L"C:\\foo_%\\stale.txt", L"stale.txt", L"C:\\foo_%", false, 1, 0, 1, 1, 1, 1);
+                index.UpsertFile(L"C:\\foo_%bar\\keep.txt", L"keep.txt", L"C:\\foo_%bar", false, 1, 0, 1, 1, 1, 1);
+                index.UpsertFile(L"C:\\fooxxx\\other.txt", L"other.txt", L"C:\\fooxxx", false, 1, 0, 1, 1, 1, 1);
+                index.SweepStale(L"C:\\foo_%", 2);
+                Assert::IsTrue(index.Search(L"stale", 1).empty());
+                Assert::IsFalse(index.Search(L"keep", 1).empty());
+                Assert::IsFalse(index.Search(L"other", 1).empty());
+            }
+            DeleteFileW(db.c_str());
+        }
+
         TEST_METHOD(TestSweepStaleRemovesFilesNotSeenInLatestGeneration)
         {
             auto dbPath = MakeTempDbPath();
@@ -185,7 +375,7 @@ namespace LocalIndexTests
             // Second walk only re-touches keep.txt (old.txt was deleted
             // from disk between scans).
             int64_t gen2 = index.BeginScanGeneration(L"C:\\");
-            Assert::IsTrue(gen2 >= gen1);
+            Assert::IsTrue(gen2 > gen1);
             index.UpsertFile(L"C:\\keep.txt", L"keep.txt", L"C:\\", false, 1, 0, 1, 1, 1, gen2);
 
             index.SweepStale(L"C:\\", gen2);

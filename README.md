@@ -10,6 +10,10 @@ This repository includes two GitHub Actions workflows:
 ### Pull Request Workflow
 - **Trigger**: Pull requests to the `main` branch
 - **Purpose**: Builds the solution and runs tests to ensure code quality
+- **Environment**: Windows Server 2022 with Visual Studio 2022, matching the
+  projects' v143 toolset and WinUI/UWP build targets. MSBuild and VSTest are
+  selected from that Visual Studio installation rather than a moving
+  `windows-latest` image.
 - **Steps**:
   - Restores NuGet packages
   - Builds the solution using MSBuild (Release x64)
@@ -102,6 +106,68 @@ side status cards collapse and the result list/search box use the available
 width. Ctrl+Shift+F is registered globally: it hides the app when the app is
 foreground, or restores, clears, and focuses search otherwise.
 
+### Index controls, exclusions, and Windows Search content scopes
+
+**Reindex local volumes** in the background-index side card queues a new walk
+of every fixed NTFS volume without deleting `index.db` or joining workers on
+the UI thread. The same control and a dedicated status line are available
+when the side cards collapse. Requests are coalesced into queued passes on the existing
+scanner; a request during a scan schedules another pass. The card shows queued,
+running, completed, or error/incomplete status. Completion refers to the name
+scan; queued local content processing continues separately. Inaccessible
+directories or enumeration failures prevent stale-row sweeping for that
+volume, retaining previously indexed data instead of deleting unseen rows.
+
+Each result's **... / Result actions** menu offers **Exclude folder** (the
+containing folder for a file, or the folder itself) and **Exclude extension**.
+These are visibility rules applied to both Windows Search and local FTS5
+results, not indexer-scope exclusions. They retain filename/content data.
+Folder rules use normalized absolute Windows paths, case-insensitive matching,
+and exact-or-descendant boundaries (`C:\foo` does not exclude `C:\foobar`).
+Extensions are canonicalized to lowercase `.ext`; folders, extensionless
+files, dotfiles with no suffix, and trailing-dot names have no extension action.
+Filtered hits do not consume the displayed result cap. Changing a rule
+invalidates in-flight queries and refreshes the current search.
+
+**Index settings**, available in both layouts, lists exclusions with **Restore**
+buttons. Its toolbar sits below the custom title-bar drag region so settings
+and compact reindex controls receive mouse clicks normally.
+Restoring a rule brings retained results back without reindexing.
+Settings use additive `exclusions` and `content_scopes` tables in the same
+`%LOCALAPPDATA%\SearchApp\index.db`, with an independent SQLite connection so
+settings operations do not hold the scanner's transaction lock.
+Opening and migrating the local database runs in the background, so large
+existing indexes cannot freeze the launch UI. Search waits for visibility
+settings to load before displaying results. The scan-generation sequence is
+seeded from existing rows only once; later launches read its single persisted
+record without rescanning the entire file table.
+
+**Request Windows Search content indexing for folder** is a separate, explicit
+per-result action. It uses `ISearchCrawlScopeManager::AddUserScopeRule` to
+include the folder URL, without overriding child rules, and `SaveAll` to
+persist it. Already-included folders keep their existing scope rules.
+URL generation escapes spaces, percent signs, reserved characters, and UTF-8
+characters, and supports UNC paths. The request runs on an MTA background
+thread; `IRowsetPrioritization::SetScopePriority` uses the SDK's
+`PRIORITY_LEVEL_LOW` (background, not foreground; there is no
+`PRIORITY_LEVEL_BACKGROUND` constant).
+
+Scope requests and pending/success/failure details are persisted and listed in
+settings. Failed, cancelled, or interrupted pending requests can be retried.
+**Forget app record** only removes the app's tracking record; it never removes
+Windows Search scope rules or undoes pre-existing system configuration.
+Permission/COM failures are shown explicitly; the app never silently elevates
+or changes scope on startup. Adding an inclusion can require administrator
+assistance through Windows Indexing Options.
+
+Catalog monitoring uses `ISearchCatalogManager::GetCatalogStatus`, checks every
+two seconds, stops after two minutes, and cancels on window close. Scope
+inclusion and `CATALOG_STATUS_IDLE` are **not proof that all content in the
+folder was indexed**: idle describes the entire catalog, while installed
+IFilters, file-type content settings, excluded child rules, service policies,
+and permissions determine actual coverage. A timeout/cancellation does not
+stop Windows Search's independent indexing.
+
 ### Tests
 
 `src/test` includes unit tests for the new functionality:
@@ -113,3 +179,11 @@ classification logic). After building the x64 Debug app, run
 `src\test\SearchAppUiSmokeTests.ps1` locally in an interactive desktop
 session to exercise the real search box, UI-thread responsiveness, narrow/
 wide resize behavior, and the global Ctrl+Shift+F hotkey.
+The smoke test creates a temporary fixture and sets `SEARCHAPP_UI_SMOKE_ROOT`
+only for its child app: this switches local scanning/storage to that fixture
+and disables Windows Search scope mutations. It exercises reindex, empty
+settings, both exclusion actions, and restoring retained results in the real
+window without changing the user's local database or Windows Search scopes.
+Additional C++ tests cover settings reopen/undo, duplicate normalization,
+folder boundaries/case, extension handling, before-cap filename/content
+filtering, escaped folder URLs, queued rescans, and incomplete-scan retention.

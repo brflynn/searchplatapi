@@ -68,6 +68,12 @@
     <ClInclude Include="BackgroundIndexer.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="IndexSettings.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ContentScopeRequest.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ApplicationDefinition Include="App.xaml">

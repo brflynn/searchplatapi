@@ -20,6 +20,8 @@
             <RowDefinition Height="48"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
@@ -30,7 +32,7 @@
                 Background="Transparent"/>
 
         <!-- Centered search box -->
-        <TextBox Grid.Row="1"
+        <TextBox Grid.Row="2"
                  Grid.ColumnSpan="3"
                  x:Name="SearchTextBox"
                  PlaceholderText="Type to search files..."
@@ -44,7 +46,7 @@
                  Margin="0,20,0,0"/>
 
         <!-- Status bar -->
-        <TextBlock Grid.Row="2"
+        <TextBlock Grid.Row="3"
                    Grid.ColumnSpan="3"
                    x:Name="StatusText"
                    HorizontalAlignment="Stretch"
@@ -52,9 +54,18 @@
                    Margin="0,10,0,0"
                    FontSize="12"
                    Foreground="#FF7E7E8E"/>
+        <StackPanel Grid.Row="1" Grid.ColumnSpan="3" Orientation="Horizontal"
+                    HorizontalAlignment="Left" Margin="24,4,24,0" Spacing="8">
+            <Button Content="Index settings" Click="Settings_Click" x:Name="IndexSettingsButton"/>
+            <Button Content="Reindex local volumes" Click="Reindex_Click" x:Name="CompactReindexButton"/>
+        </StackPanel>
+        <TextBlock Grid.Row="4" Grid.ColumnSpan="3" x:Name="CompactIndexStatusText"
+                   Visibility="Collapsed" Margin="24,8,24,0" MaxWidth="680"
+                   Foreground="#FF80BFFF" FontSize="11" TextWrapping="Wrap"
+                   MaxLines="3" TextTrimming="CharacterEllipsis"/>
 
         <!-- Live background-index status -->
-        <Border Grid.Row="3"
+        <Border Grid.Row="5"
                 Grid.Column="0"
                 x:Name="LeftStatusPanel"
                 HorizontalAlignment="Right"
@@ -72,6 +83,9 @@
                            FontWeight="SemiBold"
                            Foreground="#FF7E7E8E"
                            CharacterSpacing="80"/>
+                <Button Content="Reindex local volumes" Click="Reindex_Click" x:Name="ReindexButton"/>
+                <TextBlock x:Name="ReindexStatusText" Text="Ready" TextWrapping="Wrap"
+                           Foreground="#FFB5B5BE" FontSize="11"/>
                 <Border HorizontalAlignment="Left"
                         Padding="8,3"
                         Background="#FF253449"
@@ -117,7 +131,7 @@
         </Border>
 
         <!-- Search results -->
-        <ListView Grid.Row="3"
+        <ListView Grid.Row="5"
                   Grid.Column="1"
                   x:Name="SearchResults"
                   DoubleTapped="SearchResults_DoubleTapped"
@@ -140,6 +154,7 @@
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="28"/>
                             <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
                         <Grid.RowDefinitions>
@@ -172,13 +187,16 @@
                                        FontWeight="SemiBold"
                                        Foreground="#FFFFFFFF"/>
                         </Border>
+                        <Button Grid.Column="3" Grid.RowSpan="2" Content="..."
+                                AutomationProperties.Name="Result actions"
+                                Click="ResultActions_Click" VerticalAlignment="Center"/>
                     </Grid>
                 </DataTemplate>
             </ListView.ItemTemplate>
         </ListView>
 
         <!-- Persisted index totals -->
-        <Border Grid.Row="3"
+        <Border Grid.Row="5"
                 Grid.Column="2"
                 x:Name="RightStatusPanel"
                 HorizontalAlignment="Left"

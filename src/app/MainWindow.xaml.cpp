@@ -8,9 +8,11 @@
 #include "SearchResultItem.h"
 #include "IconCache.h"
 #include "MatchKindClassifier.h"
+#include "ContentScopeRequest.h"
 #include <SearchSessions.h>
 #include <SearchResult.h>
 #include <shellapi.h>
+#include <winrt/Microsoft.UI.Xaml.Automation.h>
 #include <algorithm>
 #include <unordered_set>
 
@@ -24,6 +26,12 @@ namespace
 {
     IconCache g_iconCache;
     constexpr int MaxResults = 50;
+
+    winrt::fire_and_forget StopIndexerAsync(std::unique_ptr<applocal::BackgroundIndexer> indexer)
+    {
+        co_await winrt::resume_background();
+        indexer->Stop();
+    }
 
     std::wstring FormatCount(uint64_t value)
     {
@@ -53,18 +61,6 @@ namespace
         return std::to_wstring(seconds) + L"s";
     }
 
-    // Case-insensitive, backslash-normalized key used to dedupe a result
-    // that both the indexer and the local index produced for the same file.
-    std::wstring NormalizePathKey(std::wstring path)
-    {
-        for (auto& c : path)
-        {
-            c = static_cast<wchar_t>(towlower(c));
-            if (c == L'/') c = L'\\';
-        }
-        return path;
-    }
-
     SearchApp::MatchKind ToWinRtMatchKind(applocal::ClassifiedMatchKind kind)
     {
         switch (kind)
@@ -91,7 +87,7 @@ namespace
 
     // Enumerate up to maxResults rows from a rowset, calling callback for each
     void EnumerateTopNResults(IRowset* rowset, int maxResults,
-        std::function<void(IPropertyStore*)> callback)
+        std::function<bool(IPropertyStore*)> callback)
     {
         winrt::com_ptr<IGetRow> getRow;
         THROW_IF_FAILED(rowset->QueryInterface(IID_PPV_ARGS(getRow.put())));
@@ -117,8 +113,7 @@ namespace
                     nullptr, rowBuffer[i], __uuidof(IPropertyStore), unknown.put()));
                 propStore = unknown.as<IPropertyStore>();
 
-                callback(propStore.get());
-                count++;
+                if (callback(propStore.get())) count++;
             }
 
             THROW_IF_FAILED(rowset->ReleaseRows(
@@ -198,21 +193,14 @@ namespace winrt::SearchApp::implementation
             StatusText().Text(L"Failed to initialize Windows Search indexer session.");
         }
 
-        // Initialize the "true index" full-filesystem background indexer.
-        // This is additive/best-effort: if the on-disk index can't be
-        // opened (e.g. no write access to %LOCALAPPDATA%), search silently
-        // falls back to indexer-only results exactly as before this feature.
-        try
+        Closed([this](auto&&, auto&&)
         {
-            m_localIndex = std::make_shared<applocal::LocalIndex>(applocal::LocalIndex::DefaultDbPath());
-            m_backgroundIndexer = std::make_unique<applocal::BackgroundIndexer>(m_localIndex);
-            m_backgroundIndexer->Start();
-        }
-        catch (...)
-        {
-            m_localIndex.reset();
-            m_backgroundIndexer.reset();
-        }
+            m_closed->store(true);
+            ++m_queryGeneration;
+            if (m_searchDebounceTimer) m_searchDebounceTimer.Stop();
+            if (m_indexStatusTimer) m_indexStatusTimer.Stop();
+            if (m_backgroundIndexer) StopIndexerAsync(std::move(m_backgroundIndexer));
+        });
 
         m_searchDebounceTimer = DispatcherQueue().CreateTimer();
         m_searchDebounceTimer.Interval(std::chrono::milliseconds(150));
@@ -243,7 +231,7 @@ namespace winrt::SearchApp::implementation
         });
         m_indexStatusTimer.Start();
         UpdateIndexerProgress();
-        UpdateIndexStatisticsAsync();
+        InitializeLocalIndexAsync();
 
         // Auto-focus the search box
         SearchTextBox().Loaded([this](auto&&, auto&&)
@@ -272,12 +260,84 @@ namespace winrt::SearchApp::implementation
         }
     }
 
+    IAsyncAction MainWindow::InitializeLocalIndexAsync()
+    {
+        auto lifetime = get_strong();
+        apartment_context ui;
+        auto cancelled = m_closed;
+        std::shared_ptr<applocal::LocalIndex> index;
+        std::unique_ptr<applocal::BackgroundIndexer> indexer;
+        bool smokeTest = false;
+        std::wstring error;
+        StatusText().Text(L"Opening local index and visibility settings...");
+        co_await resume_background();
+        try
+        {
+            std::wstring dbPath = applocal::LocalIndex::DefaultDbPath();
+            applocal::IndexerOptions options;
+            wchar_t testRoot[32768]{};
+            DWORD length = GetEnvironmentVariableW(L"SEARCHAPP_UI_SMOKE_ROOT", testRoot, ARRAYSIZE(testRoot));
+            if (length && length < ARRAYSIZE(testRoot))
+            {
+                auto root = applocal::NormalizeFolder(testRoot);
+                options.scanRoots = { root };
+                dbPath = root + L"\\ui-smoke.db";
+                smokeTest = true;
+            }
+            index = std::make_shared<applocal::LocalIndex>(dbPath, cancelled.get());
+            index->RecoverInterruptedScopeRequests();
+            indexer = std::make_unique<applocal::BackgroundIndexer>(index, options);
+            if (!cancelled->load()) indexer->Start();
+        }
+        catch (const std::exception& e)
+        {
+            error = L"Local index/settings unavailable: " + to_hstring(e.what());
+        }
+        co_await ui;
+        if (cancelled->load())
+        {
+            if (indexer) StopIndexerAsync(std::move(indexer));
+            co_return;
+        }
+        m_uiSmokeTest = smokeTest;
+        if (error.empty())
+        {
+            m_localIndex = std::move(index);
+            m_backgroundIndexer = std::move(indexer);
+        }
+        else
+        {
+            if (indexer) StopIndexerAsync(std::move(indexer));
+            m_settingsError = error;
+        }
+        m_localInitializationComplete.store(true);
+        UpdateIndexerProgress();
+        if (error.empty())
+        {
+            co_await ReloadSettingsAsync();
+            if (cancelled->load()) co_return;
+            UpdateIndexStatisticsAsync();
+            RefreshSearch();
+        }
+        else
+        {
+            PopulateSettings();
+            StatusText().Text(error);
+        }
+    }
+
     void MainWindow::UpdateIndexerProgress()
     {
         if (!m_backgroundIndexer)
         {
-            IndexerStateText().Text(L"Unavailable");
-            CurrentIndexPathText().Text(L"The local index could not be opened.");
+            ReindexButton().IsEnabled(false);
+            CompactReindexButton().IsEnabled(false);
+            const bool loading = !m_localInitializationComplete.load();
+            IndexerStateText().Text(loading ? L"Opening index..." : L"Unavailable");
+            CompactIndexStatusText().Text(loading ? L"Opening local index and settings..." :
+                L"Local reindex unavailable: local database could not be opened.");
+            CurrentIndexPathText().Text(loading ? L"Database initialization runs in the background." :
+                L"The local index could not be opened.");
             return;
         }
 
@@ -291,6 +351,9 @@ namespace winrt::SearchApp::implementation
         case applocal::IndexerState::Paused:
             stateText = L"Paused";
             break;
+        case applocal::IndexerState::Error:
+            stateText = L"Scan error / incomplete";
+            break;
         case applocal::IndexerState::Stopped:
         default:
             stateText = L"Idle";
@@ -298,16 +361,21 @@ namespace winrt::SearchApp::implementation
         }
 
         IndexerStateText().Text(stateText);
+        ReindexStatusText().Text(progress.reindexStatus);
+        CompactIndexStatusText().Text(L"Local reindex: " + progress.reindexStatus +
+            (progress.error.empty() ? L"" : L" - " + progress.error));
+        ReindexButton().IsEnabled(true);
+        CompactReindexButton().IsEnabled(true);
         SessionScannedText().Text(FormatCount(progress.filesScanned));
         IndexElapsedText().Text(FormatElapsed(progress.elapsed));
-        CurrentIndexPathText().Text(progress.currentPath.empty()
+        CurrentIndexPathText().Text(!progress.error.empty() ? progress.error : progress.currentPath.empty()
             ? L"Waiting for scan work..."
             : progress.currentPath);
     }
 
     IAsyncAction MainWindow::UpdateIndexStatisticsAsync()
     {
-        if (!m_localIndex || m_indexStatisticsRefreshInFlight.exchange(true))
+        if (m_closed->load() || !m_localIndex || m_indexStatisticsRefreshInFlight.exchange(true))
         {
             co_return;
         }
@@ -334,6 +402,7 @@ namespace winrt::SearchApp::implementation
         }
 
         co_await uiThread;
+        if (m_closed->load()) co_return;
         if (succeeded)
         {
             auto completedRoots = static_cast<uint64_t>(std::count_if(
@@ -419,6 +488,11 @@ namespace winrt::SearchApp::implementation
             StatusText().Text(L"");
             return;
         }
+        if (!m_localInitializationComplete.load())
+        {
+            StatusText().Text(L"Opening local index and visibility settings...");
+            return;
+        }
 
         m_pendingSearchText = std::move(text);
         m_pendingSearchGeneration = gen;
@@ -435,6 +509,8 @@ namespace winrt::SearchApp::implementation
         auto visibility = compact ? Visibility::Collapsed : Visibility::Visible;
         LeftStatusPanel().Visibility(visibility);
         RightStatusPanel().Visibility(visibility);
+        CompactReindexButton().Visibility(compact ? Visibility::Visible : Visibility::Collapsed);
+        CompactIndexStatusText().Visibility(compact ? Visibility::Visible : Visibility::Collapsed);
 
         if (compact)
         {
@@ -486,9 +562,259 @@ namespace winrt::SearchApp::implementation
     }
 
     void MainWindow::SearchResults_DoubleTapped(
-        IInspectable const&, DoubleTappedRoutedEventArgs const&)
+        IInspectable const&, DoubleTappedRoutedEventArgs const& args)
     {
+        auto source = args.OriginalSource().try_as<DependencyObject>();
+        while (source)
+        {
+            if (source.try_as<Controls::Primitives::ButtonBase>())
+            {
+                args.Handled(true);
+                return;
+            }
+            source = Media::VisualTreeHelper::GetParent(source);
+        }
         OpenSelectedResult();
+    }
+
+    void MainWindow::Reindex_Click(IInspectable const&, RoutedEventArgs const&)
+    {
+        if (!m_backgroundIndexer)
+        {
+            StatusText().Text(L"Cannot reindex: local index unavailable.");
+            return;
+        }
+        m_backgroundIndexer->RequestReindex();
+        ReindexStatusText().Text(L"Queued");
+        CompactIndexStatusText().Text(L"Local reindex: Queued");
+        StatusText().Text(L"Local rescan queued. Existing indexed data remains searchable.");
+    }
+
+    void MainWindow::RefreshSearch()
+    {
+        SearchResults().ItemsSource(nullptr);
+        SearchTextBox_TextChanged(nullptr, nullptr);
+    }
+
+    IAsyncAction MainWindow::ReloadSettingsAsync()
+    {
+        auto lifetime = get_strong();
+        auto generation = ++m_settingsReloadGeneration;
+        apartment_context ui;
+        if (!m_localIndex || m_closed->load()) co_return;
+        applocal::IndexSettings settings;
+        std::wstring error;
+        co_await resume_background();
+        try { settings = m_localIndex->GetSettings(); }
+        catch (const std::exception& e) { error = L"Settings error: " + to_hstring(e.what()); }
+        co_await ui;
+        if (m_closed->load() || generation != m_settingsReloadGeneration) co_return;
+        m_settingsReady = error.empty();
+        m_settingsError = error;
+        if (m_settingsReady) m_settings = std::move(settings);
+        else StatusText().Text(error);
+        PopulateSettings();
+    }
+
+    void MainWindow::Settings_Click(IInspectable const&, RoutedEventArgs const&)
+    {
+        if (m_settingsDialog) return;
+        m_settingsPanel = StackPanel();
+        m_settingsPanel.Spacing(12);
+        auto scroll = ScrollViewer();
+        scroll.MaxHeight(480);
+        scroll.Content(m_settingsPanel);
+        m_settingsDialog = ContentDialog();
+        Automation::AutomationProperties::SetAutomationId(m_settingsDialog, L"IndexSettingsDialog");
+        m_settingsDialog.XamlRoot(LayoutRoot().XamlRoot());
+        m_settingsDialog.Title(box_value(L"Index settings"));
+        m_settingsDialog.CloseButtonText(L"Close");
+        m_settingsDialog.Content(scroll);
+        m_settingsDialog.Closed([weak = get_weak()](auto&&, auto&&)
+        {
+            if (auto self = weak.get())
+            {
+                self->m_settingsPanel = nullptr;
+                self->m_settingsDialog = nullptr;
+            }
+        });
+        PopulateSettings();
+        ReloadSettingsAsync();
+        m_settingsDialog.ShowAsync();
+    }
+
+    void MainWindow::PopulateSettings()
+    {
+        if (!m_settingsPanel) return;
+        m_settingsPanel.Children().Clear();
+        auto text = [&](const std::wstring& value)
+        {
+            TextBlock label;
+            label.Text(value);
+            label.TextWrapping(TextWrapping::Wrap);
+            m_settingsPanel.Children().Append(label);
+        };
+        if (!m_operationError.empty()) text(m_operationError);
+        if (!m_settingsReady)
+        {
+            text(!m_settingsError.empty() ? m_settingsError : !m_localInitializationComplete.load() || m_localIndex ?
+                L"Loading settings..." : L"Settings unavailable: local database could not be opened.");
+            return;
+        }
+        text(L"Exclusions hide results from both search sources without deleting indexed data.");
+        if (m_settings.exclusions.empty()) text(L"No exclusions.");
+        for (const auto& rule : m_settings.exclusions)
+        {
+            text(rule.kind + L": " + rule.value);
+            Button restore;
+            restore.Content(box_value(L"Restore"));
+            Automation::AutomationProperties::SetName(restore, L"Restore " + rule.value);
+            restore.IsEnabled(!m_settingChangeInFlight);
+            restore.Click([weak = get_weak(), rule](auto&&, auto&&)
+            {
+                if (auto self = weak.get()) self->ChangeSettingAsync(L"remove", rule.kind, rule.value);
+            });
+            m_settingsPanel.Children().Append(restore);
+        }
+        text(L"Windows Search content requests (separate from local indexing)");
+        text(L"Include scope is not a guarantee of content coverage. File filters and Indexing Options control content. Forget removes only this app record, not Windows scope rules.");
+        if (m_settings.contentScopes.empty()) text(L"No content scope requests.");
+        for (const auto& scope : m_settings.contentScopes)
+        {
+            text(scope.folder + L"\n" + scope.state + L": " + scope.detail);
+            bool active = m_scopeRequests.contains(scope.folder);
+            if (!active && (scope.state == L"failed" || scope.state == L"pending" || scope.state == L"cancelled"))
+            {
+                Button retry;
+                retry.Content(box_value(L"Retry"));
+                Automation::AutomationProperties::SetName(retry, L"Retry " + scope.folder);
+                retry.IsEnabled(!m_uiSmokeTest);
+                retry.Click([weak = get_weak(), folder = scope.folder](auto&&, auto&&)
+                {
+                    if (auto self = weak.get()) self->RequestContentScopeAsync(folder);
+                });
+                m_settingsPanel.Children().Append(retry);
+            }
+            Button forget;
+            forget.Content(box_value(L"Forget app record"));
+            Automation::AutomationProperties::SetName(forget, L"Forget request " + scope.folder);
+            forget.IsEnabled(!active && !m_settingChangeInFlight);
+            forget.Click([weak = get_weak(), folder = scope.folder](auto&&, auto&&)
+            {
+                if (auto self = weak.get()) self->ChangeSettingAsync(L"forget", L"", folder);
+            });
+            m_settingsPanel.Children().Append(forget);
+        }
+    }
+
+    void MainWindow::ResultActions_Click(IInspectable const& sender, RoutedEventArgs const&)
+    {
+        auto button = sender.as<Button>();
+        auto item = button.DataContext().try_as<SearchApp::SearchResultItem>();
+        if (!item) return;
+        try
+        {
+            std::wstring path(item.FilePath());
+            auto folder = applocal::ResultFolder(path, item.IsFolder());
+            auto extension = applocal::ResultExtension(path, item.IsFolder());
+            MenuFlyout menu;
+            auto action = [&](const std::wstring& label, bool enabled, auto handler)
+            {
+                MenuFlyoutItem entry;
+                entry.Text(label);
+                entry.IsEnabled(enabled && m_settingsReady && !m_settingChangeInFlight);
+                entry.Click(handler);
+                menu.Items().Append(entry);
+            };
+            action(L"Exclude folder: " + folder, !folder.empty() && !m_settings.IsExcluded(folder, true),
+                [weak = get_weak(), folder](auto&&, auto&&)
+                {
+                    if (auto self = weak.get()) self->ChangeSettingAsync(L"add", L"folder", folder);
+                });
+            if (!extension.empty())
+                action(L"Exclude extension: " + extension, true,
+                    [weak = get_weak(), extension](auto&&, auto&&)
+                    {
+                        if (auto self = weak.get()) self->ChangeSettingAsync(L"add", L"extension", extension);
+                    });
+            bool requested = m_scopeRequests.contains(folder) ||
+                std::any_of(m_settings.contentScopes.begin(), m_settings.contentScopes.end(), [&](const auto& scope)
+                {
+                    return scope.folder == folder && scope.state != L"failed" && scope.state != L"cancelled" && scope.state != L"pending";
+                });
+            action(L"Request Windows Search content indexing for folder", !m_uiSmokeTest && !folder.empty() && !requested,
+                [weak = get_weak(), folder](auto&&, auto&&)
+                {
+                    if (auto self = weak.get()) self->RequestContentScopeAsync(folder);
+                });
+            menu.ShowAt(button);
+        }
+        catch (const std::exception& e)
+        {
+            StatusText().Text(L"Result actions unavailable: " + to_hstring(e.what()));
+        }
+    }
+
+    IAsyncAction MainWindow::ChangeSettingAsync(std::wstring operation, std::wstring kind, std::wstring value)
+    {
+        auto lifetime = get_strong();
+        if (!m_localIndex || m_settingChangeInFlight || m_closed->load()) co_return;
+        apartment_context ui;
+        m_settingChangeInFlight = true;
+        m_visibilityChanging.store(true);
+        ++m_queryGeneration;
+        SearchResults().ItemsSource(nullptr);
+        PopulateSettings();
+        std::wstring error;
+        co_await resume_background();
+        try
+        {
+            if (operation == L"add") m_localIndex->AddExclusion(kind, value);
+            else if (operation == L"remove") m_localIndex->RemoveExclusion(kind, value);
+            else m_localIndex->ForgetContentScope(value);
+        }
+        catch (const std::exception& e) { error = L"Could not save settings: " + to_hstring(e.what()); }
+        co_await ui;
+        m_visibilityChanging.store(false);
+        m_settingChangeInFlight = false;
+        m_operationError = error;
+        if (m_closed->load()) co_return;
+        co_await ReloadSettingsAsync();
+        RefreshSearch();
+        if (!error.empty()) StatusText().Text(error);
+    }
+
+    IAsyncAction MainWindow::RequestContentScopeAsync(std::wstring folder)
+    {
+        auto lifetime = get_strong();
+        if (!m_localIndex || m_closed->load() || m_uiSmokeTest || !m_scopeRequests.insert(folder).second) co_return;
+        apartment_context ui;
+        StatusText().Text(L"Windows Search scope request pending; see Index settings for details.");
+        auto cancelled = m_closed;
+        auto index = m_localIndex;
+        std::wstring persistenceError;
+        co_await resume_background();
+        try
+        {
+            index->SetContentScope({ folder, L"pending", L"Including scope and monitoring catalog at background priority." });
+        }
+        catch (const std::exception& e) { persistenceError = L"Scope request not started: " + to_hstring(e.what()); }
+        co_await ui;
+        if (persistenceError.empty() && !cancelled->load()) co_await ReloadSettingsAsync();
+        co_await resume_background();
+        applocal::ContentScope result;
+        if (persistenceError.empty())
+        {
+            result = applocal::RunContentScopeRequest(folder, *cancelled);
+            try { index->SetContentScope(result); }
+            catch (const std::exception& e) { persistenceError = L"Could not persist scope outcome: " + to_hstring(e.what()); }
+        }
+        co_await ui;
+        m_scopeRequests.erase(folder);
+        m_operationError = persistenceError;
+        if (cancelled->load()) co_return;
+        co_await ReloadSettingsAsync();
+        StatusText().Text(persistenceError.empty() ? result.detail : persistenceError);
     }
 
     void MainWindow::OpenSelectedResult()
@@ -513,7 +839,8 @@ namespace winrt::SearchApp::implementation
 
         co_await winrt::resume_background();
 
-        if (m_queryGeneration != generation || !m_searchSession)
+        if (!m_localInitializationComplete.load() ||
+            m_queryGeneration != generation || m_closed->load() || m_visibilityChanging.load())
             co_return;
 
         bool searchFailed = false;
@@ -523,8 +850,17 @@ namespace winrt::SearchApp::implementation
             QueryPerformanceFrequency(&freq);
             QueryPerformanceCounter(&startTime);
 
-            m_searchSession->SetSearchText(searchText);
-            auto rowset = m_searchSession->GetCachedResults();
+            auto settings = m_localIndex ? m_localIndex->GetSettings() : applocal::IndexSettings{};
+            winrt::com_ptr<IRowset> rowset;
+            {
+                std::lock_guard lock(m_searchSessionMutex);
+                if (m_queryGeneration != generation) co_return;
+                if (m_searchSession)
+                {
+                    m_searchSession->SetSearchText(searchText);
+                    rowset = m_searchSession->GetCachedResults();
+                }
+            }
 
             QueryPerformanceCounter(&endTime);
             double queryMs = static_cast<double>(endTime.QuadPart - startTime.QuadPart)
@@ -542,7 +878,7 @@ namespace winrt::SearchApp::implementation
                 EnumerateTopNResults(rowset.get(), MaxResults,
                     [&](IPropertyStore* ps)
                     {
-                        if (m_queryGeneration != generation) return;
+                        if (m_queryGeneration != generation) return true;
 
                         winrt::com_ptr<IPropertyStore> propStoreCopy;
                         propStoreCopy.copy_from(ps);
@@ -551,10 +887,11 @@ namespace winrt::SearchApp::implementation
                         auto path = sr.GetFilePathForTracking();
                         bool isFolder = sr.IsFolder();
 
-                        if (name.empty() || path.empty()) return;
+                        if (name.empty() || path.empty()) return false;
+                        if (settings.IsExcluded(path, isFolder)) return false;
 
-                        auto pathKey = NormalizePathKey(path);
-                        if (!seenPathKeys.insert(pathKey).second) return;
+                        auto pathKey = applocal::NormalizeFolder(path);
+                        if (!seenPathKeys.insert(pathKey).second) return false;
 
                         auto matchKind = applocal::ClassifyIndexerMatch(
                             sr.GetRank(), searchText,
@@ -562,6 +899,7 @@ namespace winrt::SearchApp::implementation
                                 sr.GetTitle(), sr.GetAuthor(), sr.GetKeywords(), sr.GetComment() });
 
                         merged.push_back(MergedResult{ std::move(name), std::move(path), isFolder, matchKind });
+                        return true;
                     });
             }
 
@@ -572,13 +910,13 @@ namespace winrt::SearchApp::implementation
             if (m_localIndex && merged.size() < MaxResults)
             {
                 auto localResults = m_localIndex->Search(
-                    searchText, static_cast<uint32_t>(MaxResults - merged.size()));
+                    searchText, MaxResults, settings);
 
                 for (auto& lr : localResults)
                 {
                     if (m_queryGeneration != generation) break;
 
-                    auto pathKey = NormalizePathKey(lr.path);
+                    auto pathKey = applocal::NormalizeFolder(lr.path);
                     if (!seenPathKeys.insert(pathKey).second) continue;
 
                     auto matchKind = (lr.matchKind == applocal::LocalMatchKind::Filename)
@@ -591,7 +929,7 @@ namespace winrt::SearchApp::implementation
                 }
             }
 
-            if (m_queryGeneration != generation)
+            if (m_queryGeneration != generation || m_closed->load() || m_visibilityChanging.load())
                 co_return;
 
             auto items = winrt::single_threaded_observable_vector<IInspectable>();
@@ -617,7 +955,7 @@ namespace winrt::SearchApp::implementation
 
             co_await ui_thread;
 
-            if (m_queryGeneration != generation)
+            if (m_queryGeneration != generation || m_closed->load() || m_visibilityChanging.load())
                 co_return;
 
             SearchResults().ItemsSource(items);
@@ -637,6 +975,7 @@ namespace winrt::SearchApp::implementation
         if (searchFailed)
         {
             co_await ui_thread;
+            if (m_queryGeneration != generation || m_closed->load() || m_visibilityChanging.load()) co_return;
             StatusText().Text(L"Search error");
         }
     }
