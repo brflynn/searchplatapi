@@ -10,6 +10,10 @@ This repository includes two GitHub Actions workflows:
 ### Pull Request Workflow
 - **Trigger**: Pull requests to the `main` branch
 - **Purpose**: Builds the solution and runs tests to ensure code quality
+- **Environment**: Windows Server 2022 with Visual Studio 2022, matching the
+  projects' v143 toolset and WinUI/UWP build targets. MSBuild and VSTest are
+  selected from that Visual Studio installation rather than a moving
+  `windows-latest` image.
 - **Steps**:
   - Restores NuGet packages
   - Builds the solution using MSBuild (Release x64)

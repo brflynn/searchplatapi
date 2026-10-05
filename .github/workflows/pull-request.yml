@@ -7,7 +7,7 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: windows-latest
+    runs-on: windows-2022
     permissions:
       contents: read
     
@@ -17,6 +17,8 @@ jobs:
     
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v2
+      with:
+        vs-version: '[17.0,18.0)'
     
     - name: Setup NuGet
       uses: nuget/setup-nuget@v2.0.0
@@ -28,4 +30,11 @@ jobs:
       run: msbuild src\SearchPlatAPI.sln /p:Configuration=Release /p:Platform=x64
     
     - name: Run tests
-      run: vstest.console.exe src\x64\Release\test.dll
+      shell: pwsh
+      run: |
+        $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        $vsPath = & $vswhere -version '[17.0,18.0)' -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
+        if (-not $vsPath) { throw 'Visual Studio 2022 was not found.' }
+        $vstest = Join-Path $vsPath 'Common7\IDE\Extensions\TestPlatform\vstest.console.exe'
+        & $vstest src\x64\Release\test.dll /Platform:x64
+        exit $LASTEXITCODE
